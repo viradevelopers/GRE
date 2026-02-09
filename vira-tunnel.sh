@@ -139,8 +139,8 @@ get_server_ips() {
     local role="$1"
     local auto_ip
     auto_ip=$(detect_local_ip)
-    IRAN_PRIVATE_IP="102.230.9.1/30"
-    KHAREJ_PRIVATE_IP="102.230.9.2/30"
+    IRAN_PRIVATE_IP="102.230.9.1"
+    KHAREJ_PRIVATE_IP="102.230.9.2"
 
     echo ""
     echo -e "${G3}    ┌──────────────────────────────────────────────────────────────┐${NC}"
@@ -192,8 +192,8 @@ get_server_ips() {
     echo -e "${G3}    ┌────────────────────────────────────────────────────────┐${NC}"
     printf "    ${G3}│${NC}  IRAN Public   : ${CYAN}%-36s${NC}${G3}│${NC}\n" "$IRAN_IP"
     printf "    ${G3}│${NC}  KHAREJ Public : ${CYAN}%-36s${NC}${G3}│${NC}\n" "$KHAREJ_IP"
-    printf "    ${G3}│${NC}  IRAN Private  : ${CYAN}%-36s${NC}${G3}│${NC}\n" "102.230.9.1/30/30 (auto)"
-    printf "    ${G3}│${NC}  KHAREJ Private: ${CYAN}%-36s${NC}${G3}│${NC}\n" "102.230.9.2/30/30 (auto)"
+    printf "    ${G3}│${NC}  IRAN Private  : ${CYAN}%-36s${NC}${G3}│${NC}\n" "102.230.9.1/30 (auto)"
+    printf "    ${G3}│${NC}  KHAREJ Private: ${CYAN}%-36s${NC}${G3}│${NC}\n" "102.230.9.2/30 (auto)"
     echo -e "${G3}    └────────────────────────────────────────────────────────┘${NC}"
     echo ""
     echo -ne "    ${G2}❯${NC} Confirm? [${GREEN}Y${NC}/n]: "
@@ -1006,8 +1006,8 @@ show_main_menu() {
     echo -e "${G3}    ┌──────────────────────────────────────────────────────────────┐${NC}"
     echo -e "${G3}    │${NC}  ${G1}⚙${NC}  ${WHITE}${BOLD}MAIN MENU${NC}                                                 ${G3}│${NC}"
     echo -e "${G3}    ├──────────────────────────────────────────────────────────────┤${NC}"
-    echo -e "${G3}    │${NC}   ${G2}[1]${NC} ➤ Setup IRAN       ${DIM}(Private: 102.230.9.1/30)${NC}               ${G3}│${NC}"
-    echo -e "${G3}    │${NC}   ${G2}[2]${NC} ➤ Setup KHAREJ     ${DIM}(Private: 102.230.9.2/30)${NC}               ${G3}│${NC}"
+    echo -e "${G3}    │${NC}   ${G2}[1]${NC} ➤ Setup IRAN       ${DIM}(Private: 102.230.9.1)${NC}               ${G3}│${NC}"
+    echo -e "${G3}    │${NC}   ${G2}[2]${NC} ➤ Setup KHAREJ     ${DIM}(Private: 102.230.9.2)${NC}               ${G3}│${NC}"
     echo -e "${G3}    │${NC}   ${G2}[3]${NC} ➤ Status & Ping    ${DIM}(Full Diagnostics)${NC}                  ${G3}│${NC}"
     echo -e "${G3}    │${NC}   ${G2}[4]${NC} ➤ Restart Tunnel   ${DIM}(Restart + Test)${NC}                    ${G3}│${NC}"
     echo -e "${G3}    │${NC}   ${G2}[5]${NC} ➤ ${RED}Uninstall${NC}        ${DIM}(Nuclear Complete Reset)${NC}            ${G3}│${NC}"
