@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-#  VIRA TUNNEL v5.0 - Professional GRE Tunnel Manager
+#  VIRA TUNNEL v1.0 - Professional GRE Tunnel Manager
 #  SSH-Safe | Auto Private IP | Full Diagnostics
 # ============================================================
 
@@ -57,7 +57,7 @@ show_logo() {
     echo -e "${G7}    ║${G8}      ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚══════╝     ${G7}║${NC}"
     echo -e "${G7}    ║${NC}                                                              ${G7}║${NC}"
     echo -e "${G8}    ╠══════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${G8}    ║${NC}  ${G2}★${NC} ${WHITE}Professional GRE Tunnel Manager${NC}        ${DIM}Version 5.0${NC}     ${G8}  ║${NC}"
+    echo -e "${G8}    ║${NC}  ${G2}★${NC} ${WHITE}Professional GRE Tunnel Manager${NC}        ${DIM}Version 1.0${NC}     ${G8}  ║${NC}"
     echo -e "${G8}    ║${NC}  ${G3}★${NC} ${DIM}SSH-Safe • Auto-IP • Full Diagnostics${NC}                   ${G8}  ║${NC}"
     echo -e "${G8}    ╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
