@@ -34,7 +34,7 @@ show_logo() {
     echo "║                                                                   ║"
     echo -e "║           ${WHITE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CYAN}           ║"
     echo -e "║           ${YELLOW}⚡  GRE Tunnel Auto Installer v1.0  ⚡${CYAN}              ║"
-    echo -e "║           ${GREEN}      Secure  •  Fast  •  Reliable${CYAN}                    ║"
+    echo -e "║           ${GREEN}            Vira Developers${CYAN}                           ║"
     echo -e "║           ${WHITE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${CYAN}           ║"
     echo "║                                                                   ║"
     echo "╚═══════════════════════════════════════════════════════════════════╝"
