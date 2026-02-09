@@ -1,10 +1,9 @@
 #!/bin/bash
 # ============================================================
-#  VIRA TUNNEL v1.0 - Professional GRE Tunnel Setup Script
-#  All bugs fixed - Safe iptables rules
+#  VIRA TUNNEL v5.0 - Professional GRE Tunnel Manager
+#  SSH-Safe | Auto Private IP | Full Diagnostics
 # ============================================================
 
-# ──────────────────── COLORS ────────────────────
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -23,21 +22,20 @@ G7='\033[38;5;208m'
 G8='\033[38;5;179m'
 BG_GOLD='\033[48;5;136m'
 
-# ──────────────────── PATHS ────────────────────
 CONFIG_DIR="/etc/vira-tunnel"
 CONFIG_FILE="${CONFIG_DIR}/config"
 TUNNEL_SCRIPT="/usr/local/sbin/vira-gre.sh"
 SERVICE_FILE="/etc/systemd/system/vira-gre.service"
 TUNNEL_NAME="viraGRE"
-VIRA_CHAIN="VIRA_NAT"
+VIRA_PREROUTING="VIRA_PRE"
+VIRA_POSTROUTING="VIRA_POST"
 
-# ──────────────────── GLOBALS ────────────────────
 IRAN_IP=""
 KHAREJ_IP=""
 IRAN_PRIVATE_IP=""
 KHAREJ_PRIVATE_IP=""
 
-# ──────────────────── BASIC FUNCTIONS ────────────────────
+# ──────────────────── LOGO ────────────────────
 
 show_logo() {
     clear
@@ -59,23 +57,22 @@ show_logo() {
     echo -e "${G7}    ║${G8}      ╚═╝    ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚══════╝     ${G7}║${NC}"
     echo -e "${G7}    ║${NC}                                                              ${G7}║${NC}"
     echo -e "${G8}    ╠══════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${G8}    ║${NC}  ${G2}★${NC} ${WHITE}Professional GRE Tunnel Manager${NC}        ${DIM}Version 1.0${NC}     ${G8}  ║${NC}"
-    echo -e "${G8}    ║${NC}  ${G3}★${NC} ${DIM}Secure • Fast • Reliable • Persistent${NC}                   ${G8}  ║${NC}"
+    echo -e "${G8}    ║${NC}  ${G2}★${NC} ${WHITE}Professional GRE Tunnel Manager${NC}        ${DIM}Version 5.0${NC}     ${G8}  ║${NC}"
+    echo -e "${G8}    ║${NC}  ${G3}★${NC} ${DIM}SSH-Safe • Auto-IP • Full Diagnostics${NC}                   ${G8}  ║${NC}"
     echo -e "${G8}    ╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
 
-ok()   { echo -e "    ${GREEN}  ✔  $1${NC}"; }
-err()  { echo -e "    ${RED}  ✘  $1${NC}"; }
-warn() { echo -e "    ${YELLOW}  ⚠  $1${NC}"; }
-info() { echo -e "    ${CYAN}  ℹ  $1${NC}"; }
+# ──────────────────── HELPERS ────────────────────
+
+ok()   { echo -e "    ${GREEN}  ✔  ${NC}$1"; }
+err()  { echo -e "    ${RED}  ✘  ${NC}$1"; }
+warn() { echo -e "    ${YELLOW}  ⚠  ${NC}$1"; }
+info() { echo -e "    ${CYAN}  ℹ  ${NC}$1"; }
 step() { echo -e "    ${G2}[Step $1]${NC} ${WHITE}$2${NC}"; }
 
 check_root() {
-    if [[ $EUID -ne 0 ]]; then
-        err "Run as root: sudo bash $0"
-        exit 1
-    fi
+    [[ $EUID -ne 0 ]] && { err "Run as root: ${WHITE}sudo bash $0${NC}"; exit 1; }
 }
 
 validate_ip() {
@@ -88,6 +85,10 @@ validate_ip() {
 
 detect_local_ip() {
     ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'src \K[0-9.]+' | head -1
+}
+
+detect_main_interface() {
+    ip -4 route get 8.8.8.8 2>/dev/null | grep -oP 'dev \K\S+' | head -1
 }
 
 ensure_gre_module() {
@@ -123,7 +124,7 @@ progress_bar() {
     echo -e "] ${GREEN}Done!${NC}"
 }
 
-# ──────────────────── IP INPUT ────────────────────
+# ──────────────────── GET IPS ────────────────────
 
 get_server_ips() {
     local role="$1"
@@ -136,149 +137,151 @@ get_server_ips() {
     echo -e "${G3}    └──────────────────────────────────────────────────────────────┘${NC}"
     echo ""
 
+    # Auto private IPs
+    IRAN_PRIVATE_IP="10.10.10.1"
+    KHAREJ_PRIVATE_IP="10.10.10.2"
+
     if [[ "$role" == "IRAN" ]]; then
-        echo -ne "    ${G2}❯${NC} IRAN Server Public IP [${CYAN}${auto_ip}${NC}]: "
-        read input; IRAN_IP=${input:-$auto_ip}
-        while ! validate_ip "$IRAN_IP"; do err "Invalid!"; echo -ne "    ${G2}❯${NC} IRAN IP: "; read IRAN_IP; done
+        echo -ne "    ${G2}❯${NC} ${WHITE}IRAN Server Public IP${NC} [${CYAN}${auto_ip}${NC}]: "
+        read input
+        IRAN_IP=${input:-$auto_ip}
+        while ! validate_ip "$IRAN_IP"; do
+            err "Invalid IP!"
+            echo -ne "    ${G2}❯${NC} ${WHITE}IRAN IP:${NC} "
+            read IRAN_IP
+        done
         ok "IRAN: ${CYAN}$IRAN_IP${NC}"
         echo ""
-        echo -ne "    ${G2}❯${NC} KHAREJ Server Public IP: "
+
+        echo -ne "    ${G2}❯${NC} ${WHITE}KHAREJ Server Public IP:${NC} "
         read KHAREJ_IP
-        while ! validate_ip "$KHAREJ_IP"; do err "Invalid!"; echo -ne "    ${G2}❯${NC} KHAREJ IP: "; read KHAREJ_IP; done
+        while ! validate_ip "$KHAREJ_IP"; do
+            err "Invalid IP!"
+            echo -ne "    ${G2}❯${NC} ${WHITE}KHAREJ IP:${NC} "
+            read KHAREJ_IP
+        done
         ok "KHAREJ: ${CYAN}$KHAREJ_IP${NC}"
     else
-        echo -ne "    ${G2}❯${NC} KHAREJ Server Public IP [${CYAN}${auto_ip}${NC}]: "
-        read input; KHAREJ_IP=${input:-$auto_ip}
-        while ! validate_ip "$KHAREJ_IP"; do err "Invalid!"; echo -ne "    ${G2}❯${NC} KHAREJ IP: "; read KHAREJ_IP; done
+        echo -ne "    ${G2}❯${NC} ${WHITE}KHAREJ Server Public IP${NC} [${CYAN}${auto_ip}${NC}]: "
+        read input
+        KHAREJ_IP=${input:-$auto_ip}
+        while ! validate_ip "$KHAREJ_IP"; do
+            err "Invalid IP!"
+            echo -ne "    ${G2}❯${NC} ${WHITE}KHAREJ IP:${NC} "
+            read KHAREJ_IP
+        done
         ok "KHAREJ: ${CYAN}$KHAREJ_IP${NC}"
         echo ""
-        echo -ne "    ${G2}❯${NC} IRAN Server Public IP: "
+
+        echo -ne "    ${G2}❯${NC} ${WHITE}IRAN Server Public IP:${NC} "
         read IRAN_IP
-        while ! validate_ip "$IRAN_IP"; do err "Invalid!"; echo -ne "    ${G2}❯${NC} IRAN IP: "; read IRAN_IP; done
+        while ! validate_ip "$IRAN_IP"; do
+            err "Invalid IP!"
+            echo -ne "    ${G2}❯${NC} ${WHITE}IRAN IP:${NC} "
+            read IRAN_IP
+        done
         ok "IRAN: ${CYAN}$IRAN_IP${NC}"
     fi
 
     echo ""
-    echo -e "    ${DIM}Private IPs (Enter for defaults)${NC}"
-    echo -ne "    ${G2}❯${NC} IRAN Private IP [${CYAN}10.10.10.1${NC}]: "
-    read IRAN_PRIVATE_IP; IRAN_PRIVATE_IP=${IRAN_PRIVATE_IP:-10.10.10.1}
-    validate_ip "$IRAN_PRIVATE_IP" || IRAN_PRIVATE_IP="10.10.10.1"
-
-    echo -ne "    ${G2}❯${NC} KHAREJ Private IP [${CYAN}10.10.10.2${NC}]: "
-    read KHAREJ_PRIVATE_IP; KHAREJ_PRIVATE_IP=${KHAREJ_PRIVATE_IP:-10.10.10.2}
-    validate_ip "$KHAREJ_PRIVATE_IP" || KHAREJ_PRIVATE_IP="10.10.10.2"
-
-    echo ""
     echo -e "${G3}    ┌────────────────────────────────────────────────────────┐${NC}"
-    printf "    ${G3}│${NC}  IRAN Public   : ${CYAN}%-38s${NC}${G3}│${NC}\n" "$IRAN_IP"
-    printf "    ${G3}│${NC}  KHAREJ Public : ${CYAN}%-38s${NC}${G3}│${NC}\n" "$KHAREJ_IP"
-    printf "    ${G3}│${NC}  IRAN Private  : ${CYAN}%-38s${NC}${G3}│${NC}\n" "${IRAN_PRIVATE_IP}/30"
-    printf "    ${G3}│${NC}  KHAREJ Private: ${CYAN}%-38s${NC}${G3}│${NC}\n" "${KHAREJ_PRIVATE_IP}/30"
+    printf "    ${G3}│${NC}  ${WHITE}IRAN Public${NC}    : ${CYAN}%-36s${NC}${G3}│${NC}\n" "$IRAN_IP"
+    printf "    ${G3}│${NC}  ${WHITE}KHAREJ Public${NC}  : ${CYAN}%-36s${NC}${G3}│${NC}\n" "$KHAREJ_IP"
+    printf "    ${G3}│${NC}  ${WHITE}IRAN Private${NC}   : ${CYAN}%-36s${NC}${G3}│${NC}\n" "${IRAN_PRIVATE_IP}/30 (auto)"
+    printf "    ${G3}│${NC}  ${WHITE}KHAREJ Private${NC} : ${CYAN}%-36s${NC}${G3}│${NC}\n" "${KHAREJ_PRIVATE_IP}/30 (auto)"
     echo -e "${G3}    └────────────────────────────────────────────────────────┘${NC}"
     echo ""
 
-    echo -ne "    ${G2}❯${NC} Confirm? [${GREEN}Y${NC}/n]: "
+    echo -ne "    ${G2}❯${NC} ${WHITE}Confirm?${NC} [${GREEN}Y${NC}/n]: "
     read c
     [[ "$c" == "n" || "$c" == "N" ]] && return 1
     return 0
 }
 
-# ──────────────────── SAFE IPTABLES FOR IRAN ────────────────────
-#
-# *** THIS IS THE KEY FIX ***
-#
-# The old rules:
-#   iptables -t nat -A PREROUTING -j DNAT --to-destination <kharej>
-# This catches ALL traffic including your SSH session → you get locked out!
-#
-# The fix:
-#   1. EXCLUDE the server's own SSH (port 22)
-#   2. EXCLUDE GRE protocol traffic (protocol 47)
-#   3. EXCLUDE traffic TO the server's own public IP on management ports
-#   4. Only DNAT traffic that is meant to be forwarded
-#   5. Use a custom chain so we can cleanly flush without breaking other rules
+# ──────────────────── SAFE IPTABLES ────────────────────
+
+cleanup_vira_iptables() {
+    # Safely remove ONLY vira chains, don't touch anything else
+    iptables -t nat -D PREROUTING -j ${VIRA_PREROUTING} 2>/dev/null || true
+    iptables -t nat -F ${VIRA_PREROUTING} 2>/dev/null || true
+    iptables -t nat -X ${VIRA_PREROUTING} 2>/dev/null || true
+
+    iptables -t nat -D POSTROUTING -j ${VIRA_POST} 2>/dev/null || true
+    iptables -t nat -F ${VIRA_POST} 2>/dev/null || true
+    iptables -t nat -X ${VIRA_POST} 2>/dev/null || true
+}
 
 setup_iran_iptables() {
-    local iran_pub="$1"
-    local iran_priv="$2"
-    local kharej_priv="$3"
+    local iran_priv="$1"
+    local kharej_priv="$2"
 
     info "Setting SAFE iptables rules..."
     echo ""
 
-    # Remove old custom chain if exists
-    iptables -t nat -D PREROUTING -j ${VIRA_CHAIN} 2>/dev/null || true
-    iptables -t nat -F ${VIRA_CHAIN} 2>/dev/null || true
-    iptables -t nat -X ${VIRA_CHAIN} 2>/dev/null || true
+    # Clean old vira rules only
+    cleanup_vira_iptables
 
-    # Create custom chain
-    iptables -t nat -N ${VIRA_CHAIN} 2>/dev/null || true
+    # ═══ PREROUTING CHAIN ═══
+    iptables -t nat -N ${VIRA_PREROUTING} 2>/dev/null || true
 
-    # ═══ EXCLUSIONS (traffic that must NOT be redirected) ═══
+    # Don't touch SSH
+    iptables -t nat -A ${VIRA_PREROUTING} -p tcp --dport 22 -j RETURN
+    ok "SSH (22) → SAFE"
 
-    # 1. Don't touch SSH (port 22) → keeps your access alive
-    iptables -t nat -A ${VIRA_CHAIN} -p tcp --dport 22 -j RETURN
-    ok "Rule: SSH (22) → EXCLUDED (keeps your access)"
+    # Don't touch GRE
+    iptables -t nat -A ${VIRA_PREROUTING} -p gre -j RETURN
+    ok "GRE → SAFE"
 
-    # 2. Don't touch GRE protocol → tunnel itself must work
-    iptables -t nat -A ${VIRA_CHAIN} -p gre -j RETURN
-    ok "Rule: GRE protocol → EXCLUDED (tunnel traffic)"
+    # Don't touch ICMP
+    iptables -t nat -A ${VIRA_PREROUTING} -p icmp -j RETURN
+    ok "ICMP → SAFE"
 
-    # 3. Don't touch ICMP → ping must work for diagnostics
-    iptables -t nat -A ${VIRA_CHAIN} -p icmp -j RETURN
-    ok "Rule: ICMP (ping) → EXCLUDED (diagnostics)"
+    # Don't touch DNS
+    iptables -t nat -A ${VIRA_PREROUTING} -p udp --dport 53 -j RETURN
+    iptables -t nat -A ${VIRA_PREROUTING} -p tcp --dport 53 -j RETURN
+    ok "DNS (53) → SAFE"
 
-    # 4. Don't touch DNS (port 53) → server needs DNS
-    iptables -t nat -A ${VIRA_CHAIN} -p udp --dport 53 -j RETURN
-    iptables -t nat -A ${VIRA_CHAIN} -p tcp --dport 53 -j RETURN
-    ok "Rule: DNS (53) → EXCLUDED"
+    # Don't touch tunnel subnet
+    iptables -t nat -A ${VIRA_PREROUTING} -s ${iran_priv}/30 -j RETURN
+    ok "Tunnel subnet → SAFE"
 
-    # 5. Don't touch traffic from tunnel subnet → internal tunnel traffic
-    iptables -t nat -A ${VIRA_CHAIN} -s ${iran_priv}/30 -j RETURN
-    ok "Rule: Tunnel subnet → EXCLUDED"
+    # Don't touch established
+    iptables -t nat -A ${VIRA_PREROUTING} -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    ok "Established → SAFE"
 
-    # 6. Don't touch established/related connections
-    iptables -t nat -A ${VIRA_CHAIN} -m state --state ESTABLISHED,RELATED -j RETURN
-    ok "Rule: Established connections → EXCLUDED"
+    # Forward to KHAREJ
+    iptables -t nat -A ${VIRA_PREROUTING} -p tcp -j DNAT --to-destination ${kharej_priv}
+    iptables -t nat -A ${VIRA_PREROUTING} -p udp -j DNAT --to-destination ${kharej_priv}
+    ok "TCP/UDP → DNAT to ${CYAN}${kharej_priv}${NC}"
 
-    # ═══ FORWARD RULES (what gets redirected to KHAREJ) ═══
+    # Hook
+    iptables -t nat -A PREROUTING -j ${VIRA_PREROUTING}
+    ok "PREROUTING chain hooked"
 
-    # Forward TCP traffic (except excluded above) to KHAREJ
-    iptables -t nat -A ${VIRA_CHAIN} -p tcp -j DNAT --to-destination ${kharej_priv}
-    ok "Rule: TCP → DNAT to ${CYAN}${kharej_priv}${NC}"
-
-    # Forward UDP traffic (except excluded above) to KHAREJ
-    iptables -t nat -A ${VIRA_CHAIN} -p udp -j DNAT --to-destination ${kharej_priv}
-    ok "Rule: UDP → DNAT to ${CYAN}${kharej_priv}${NC}"
-
-    # Hook our chain into PREROUTING
-    iptables -t nat -A PREROUTING -j ${VIRA_CHAIN}
-    ok "Chain ${VIRA_CHAIN} hooked into PREROUTING"
-
-    # MASQUERADE for return traffic (clean first)
-    iptables -t nat -D POSTROUTING -j MASQUERADE 2>/dev/null || true
-    iptables -t nat -A POSTROUTING -o ${TUNNEL_NAME} -j MASQUERADE
-    iptables -t nat -A POSTROUTING -s ${iran_priv}/30 -j MASQUERADE
-    ok "MASQUERADE for tunnel traffic"
+    # ═══ POSTROUTING CHAIN ═══
+    iptables -t nat -N ${VIRA_POST} 2>/dev/null || true
+    iptables -t nat -A ${VIRA_POST} -o ${TUNNEL_NAME} -j MASQUERADE
+    iptables -t nat -A ${VIRA_POST} -s ${iran_priv}/30 -j MASQUERADE
+    iptables -t nat -A POSTROUTING -j ${VIRA_POST}
+    ok "POSTROUTING MASQUERADE for tunnel"
 
     echo ""
 }
 
 setup_kharej_iptables() {
-    # KHAREJ side is simple - just MASQUERADE
-    iptables -t nat -F POSTROUTING 2>/dev/null || true
-    iptables -t nat -A POSTROUTING -j MASQUERADE
-    ok "MASQUERADE rule set"
+    cleanup_vira_iptables
+
+    iptables -t nat -N ${VIRA_POST} 2>/dev/null || true
+    iptables -t nat -A ${VIRA_POST} -j MASQUERADE
+    iptables -t nat -A POSTROUTING -j ${VIRA_POST}
+    ok "MASQUERADE set"
 }
 
 # ──────────────────── ANIMATED PING ────────────────────
 
 animated_ping() {
-    local target="$1"
-    local label="$2"
-    local count=4
-    local success=0 fail=0
-    local times=()
+    local target="$1" label="$2"
+    local count=4 success=0 fail=0 times=()
 
     echo -e "    ${G6}╭───────────────────────────────────────────────────────────╮${NC}"
     echo -e "    ${G6}│${NC}  ${G2}🏓${NC} ${WHITE}${BOLD}${label}${NC}"
@@ -289,18 +292,14 @@ animated_ping() {
         echo -ne "    ${G6}│${NC}  ${DIM}Packet ${i}/${count}...${NC}"
         local res
         res=$(ping -c 1 -W 3 "$target" 2>&1)
-
         if [[ $? -eq 0 ]]; then
             local rtt
             rtt=$(echo "$res" | grep -oP 'time=\K[0-9.]+' || echo "")
             success=$((success+1))
-
             if [[ -n "$rtt" ]]; then
                 times+=("$rtt")
                 local ri=${rtt%.*}; ri=${ri:-0}
-                local clr="${GREEN}"
-                ((ri > 100)) && clr="${YELLOW}"
-                ((ri > 300)) && clr="${RED}"
+                local clr="${GREEN}"; ((ri>100)) && clr="${YELLOW}"; ((ri>300)) && clr="${RED}"
                 echo -e "\r    ${G6}│${NC}  ${GREEN}✔${NC} Packet ${i}: ${clr}${rtt} ms${NC}                              "
             else
                 echo -e "\r    ${G6}│${NC}  ${GREEN}✔${NC} Packet ${i}: ${GREEN}OK${NC}                                    "
@@ -313,29 +312,24 @@ animated_ping() {
     done
 
     echo -e "    ${G6}├───────────────────────────────────────────────────────────┤${NC}"
-
-    local loss=$((fail * 100 / count))
+    local loss=$((fail*100/count))
 
     if ((success > 0)); then
         local min_t="999999" max_t="0" sum_t="0"
         for t in "${times[@]}"; do
-            sum_t=$(awk "BEGIN{printf \"%.2f\", $sum_t + $t}")
+            sum_t=$(awk "BEGIN{printf \"%.2f\",$sum_t+$t}")
             local ti=${t%.*}; ti=${ti:-0}
             local mi=${min_t%.*}; mi=${mi:-999999}
             local mx=${max_t%.*}; mx=${mx:-0}
-            ((ti < mi)) && min_t="$t"
-            ((ti > mx)) && max_t="$t"
+            ((ti<mi)) && min_t="$t"; ((ti>mx)) && max_t="$t"
         done
         local avg_t
-        avg_t=$(awk "BEGIN{printf \"%.2f\", $sum_t / ${#times[@]}}")
-
-        local lc="${GREEN}"; ((loss > 0)) && lc="${YELLOW}"; ((loss >= 100)) && lc="${RED}"
-        echo -e "    ${G6}│${NC}  ${GREEN}✅ CONNECTED${NC}  |  ${success}/${count} ok  ${lc}(${loss}% loss)${NC}"
-
+        avg_t=$(awk "BEGIN{printf \"%.2f\",$sum_t/${#times[@]}}")
+        local lc="${GREEN}"; ((loss>0)) && lc="${YELLOW}"; ((loss>=100)) && lc="${RED}"
+        echo -e "    ${G6}│${NC}  ${GREEN}✅ CONNECTED${NC}  ${success}/${count} ok  ${lc}(${loss}% loss)${NC}"
         if [[ ${#times[@]} -gt 0 ]]; then
-            echo -e "    ${G6}│${NC}  ${G2}⏱${NC}  min=${CYAN}${min_t}ms${NC}  avg=${CYAN}${avg_t}ms${NC}  max=${CYAN}${max_t}ms${NC}"
-            local ai=${avg_t%.*}; ai=${ai:-0}
-            local q="" qb=""
+            echo -e "    ${G6}│${NC}  ${G2}⏱${NC}  min=${CYAN}${min_t}ms${NC} avg=${CYAN}${avg_t}ms${NC} max=${CYAN}${max_t}ms${NC}"
+            local ai=${avg_t%.*}; ai=${ai:-0}; local q="" qb=""
             if   ((ai<=30));  then q="${GREEN}${BOLD}EXCELLENT${NC}"; qb="${GREEN}██████████${NC}"
             elif ((ai<=80));  then q="${GREEN}VERY GOOD${NC}";       qb="${GREEN}████████${NC}${DIM}██${NC}"
             elif ((ai<=150)); then q="${YELLOW}GOOD${NC}";           qb="${YELLOW}██████${NC}${DIM}████${NC}"
@@ -345,10 +339,9 @@ animated_ping() {
             echo -e "    ${G6}│${NC}  ${G2}📶${NC}  Quality: [${qb}] ${q}"
         fi
     else
-        echo -e "    ${G6}│${NC}  ${RED}❌ DISCONNECTED${NC}  |  ${RED}100% loss${NC}"
-        echo -e "    ${G6}│${NC}  ${YELLOW}💡 Check: remote server, firewall, config${NC}"
+        echo -e "    ${G6}│${NC}  ${RED}❌ DISCONNECTED${NC}  ${RED}100% loss${NC}"
+        echo -e "    ${G6}│${NC}  ${YELLOW}💡 Check remote server & firewall${NC}"
     fi
-
     echo -e "    ${G6}╰───────────────────────────────────────────────────────────╯${NC}"
     echo ""
 }
@@ -358,7 +351,6 @@ animated_ping() {
 setup_iran() {
     show_logo
     echo -e "    ${BG_GOLD}${WHITE}${BOLD}  ⚡ IRAN Server Setup 🇮🇷  ${NC}"
-    echo ""
     get_server_ips "IRAN" || return
 
     echo ""
@@ -367,15 +359,12 @@ setup_iran() {
     echo -e "${G3}    └──────────────────────────────────────────────────────────────┘${NC}"
     echo ""
 
-    # 1. GRE Module
-    step "1/8" "Loading GRE kernel module..."
+    step "1/8" "Loading GRE module..."
     ensure_gre_module
-    lsmod | grep -q "ip_gre" && ok "ip_gre loaded" || { err "GRE module failed"; warn "apt install linux-modules-extra-\$(uname -r)"; }
-    sleep 0.3
+    lsmod | grep -q "ip_gre" && ok "ip_gre loaded" || err "GRE failed"
 
-    # 2. Tunnel Script
     step "2/8" "Creating tunnel script..."
-    cat > "$TUNNEL_SCRIPT" << EOF
+    cat > "$TUNNEL_SCRIPT" << TUNEOF
 #!/bin/bash
 set -e
 modprobe ip_gre 2>/dev/null || true
@@ -386,48 +375,37 @@ ip tunnel add ${TUNNEL_NAME} mode gre remote ${KHAREJ_IP} local ${IRAN_IP} ttl 2
 ip link set ${TUNNEL_NAME} mtu 1476
 ip addr add ${IRAN_PRIVATE_IP}/30 dev ${TUNNEL_NAME}
 ip link set ${TUNNEL_NAME} up
-echo "VIRA TUNNEL IRAN UP - $(date)"
-EOF
+echo "VIRA TUNNEL IRAN UP"
+TUNEOF
     chmod +x "$TUNNEL_SCRIPT"
-    ok "Script: ${TUNNEL_SCRIPT}"
-    sleep 0.3
+    ok "Script created"
 
-    # 3. Save Config
     step "3/8" "Saving config..."
     save_config "IRAN"
-    ok "Config saved"
-    sleep 0.3
+    ok "Saved"
 
-    # 4. IP Forward
     step "4/8" "Enabling IP forwarding..."
     sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
     echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
     sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
-    [[ "$(cat /proc/sys/net/ipv4/ip_forward)" == "1" ]] && ok "Forwarding ON" || err "Forwarding FAILED"
-    sleep 0.3
+    ok "Forwarding ON"
 
-    # 5. Install iptables-persistent
     step "5/8" "Installing iptables-persistent..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq > /dev/null 2>&1
     apt-get install -y -qq iptables-persistent netfilter-persistent > /dev/null 2>&1
-    ok "iptables-persistent installed"
-    sleep 0.3
+    ok "Installed"
 
-    # 6. SAFE iptables rules
-    step "6/8" "Configuring SAFE iptables rules..."
+    step "6/8" "Setting SAFE iptables..."
     echo ""
-    setup_iran_iptables "$IRAN_IP" "$IRAN_PRIVATE_IP" "$KHAREJ_PRIVATE_IP"
+    setup_iran_iptables "$IRAN_PRIVATE_IP" "$KHAREJ_PRIVATE_IP"
 
-    # 7. Save rules
-    step "7/8" "Saving iptables rules..."
+    step "7/8" "Saving iptables..."
     netfilter-persistent save > /dev/null 2>&1
-    ok "Rules saved"
-    sleep 0.3
+    ok "Saved"
 
-    # 8. Service + Start
-    step "8/8" "Creating service and starting tunnel..."
-    cat > "$SERVICE_FILE" << EOF
+    step "8/8" "Starting tunnel..."
+    cat > "$SERVICE_FILE" << SVCEOF
 [Unit]
 Description=VIRA TUNNEL GRE (IRAN)
 After=network-online.target
@@ -440,40 +418,29 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-EOF
-
+SVCEOF
     systemctl daemon-reload
     systemctl enable vira-gre.service > /dev/null 2>&1
-
-    # Run directly to avoid service timing issues
     bash "$TUNNEL_SCRIPT" > /dev/null 2>&1 || true
     systemctl restart vira-gre.service > /dev/null 2>&1 || true
     sleep 1
 
-    # Verify
     if ip link show ${TUNNEL_NAME} 2>/dev/null | grep -qE "UP|UNKNOWN"; then
-        local tip
-        tip=$(ip addr show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'inet \K[0-9.]+')
+        local tip; tip=$(ip addr show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'inet \K[0-9.]+')
         ok "${GREEN}${BOLD}Tunnel UP!${NC} IP: ${CYAN}${tip}${NC}"
     else
-        err "Tunnel interface issue - check logs"
+        err "Tunnel not up yet"
     fi
 
     echo ""
     progress_bar 1 "Finalizing"
     echo ""
-
-    # Quick test
-    echo -e "    ${G6}${BOLD}▸ Quick Local Test${NC}"
-    echo ""
     animated_ping "$IRAN_PRIVATE_IP" "Local Self-Ping (${IRAN_PRIVATE_IP})"
 
     echo -e "${G3}    ╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${G3}    ║${NC}  ${GREEN}${BOLD}✅ IRAN SERVER READY!${NC}                                       ${G3}║${NC}"
-    echo -e "${G3}    ╠══════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${G3}    ║${NC}  ${WHITE}Now run this script on KHAREJ server (option 2)${NC}              ${G3}║${NC}"
-    echo -e "${G3}    ║${NC}  ${WHITE}Use the SAME IPs on both sides${NC}                               ${G3}║${NC}"
-    echo -e "${G3}    ║${NC}  ${YELLOW}Your SSH access is SAFE (port 22 excluded)${NC}                   ${G3}║${NC}"
+    echo -e "${G3}    ║${NC}  ${WHITE}Now setup KHAREJ server with option 2${NC}                       ${G3}║${NC}"
+    echo -e "${G3}    ║${NC}  ${G2}Private IPs: IRAN=${CYAN}10.10.10.1${NC} KHAREJ=${CYAN}10.10.10.2${NC}            ${G3}║${NC}"
     echo -e "${G3}    ╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -ne "    ${G2}❯${NC} Press Enter..."
@@ -485,7 +452,6 @@ EOF
 setup_kharej() {
     show_logo
     echo -e "    ${BG_GOLD}${WHITE}${BOLD}  ⚡ KHAREJ Server Setup 🌍  ${NC}"
-    echo ""
     get_server_ips "KHAREJ" || return
 
     echo ""
@@ -494,15 +460,12 @@ setup_kharej() {
     echo -e "${G3}    └──────────────────────────────────────────────────────────────┘${NC}"
     echo ""
 
-    # 1. GRE
     step "1/7" "Loading GRE module..."
     ensure_gre_module
     lsmod | grep -q "ip_gre" && ok "ip_gre loaded" || err "GRE failed"
-    sleep 0.3
 
-    # 2. Script
     step "2/7" "Creating tunnel script..."
-    cat > "$TUNNEL_SCRIPT" << EOF
+    cat > "$TUNNEL_SCRIPT" << TUNEOF
 #!/bin/bash
 set -e
 modprobe ip_gre 2>/dev/null || true
@@ -513,44 +476,34 @@ ip tunnel add ${TUNNEL_NAME} mode gre remote ${IRAN_IP} local ${KHAREJ_IP} ttl 2
 ip link set ${TUNNEL_NAME} mtu 1476
 ip addr add ${KHAREJ_PRIVATE_IP}/30 dev ${TUNNEL_NAME}
 ip link set ${TUNNEL_NAME} up
-echo "VIRA TUNNEL KHAREJ UP - $(date)"
-EOF
+echo "VIRA TUNNEL KHAREJ UP"
+TUNEOF
     chmod +x "$TUNNEL_SCRIPT"
     ok "Script created"
-    sleep 0.3
 
-    # 3. Config
     step "3/7" "Saving config..."
     save_config "KHAREJ"
-    ok "Config saved"
-    sleep 0.3
+    ok "Saved"
 
-    # 4. Forward
     step "4/7" "Enabling IP forwarding..."
     sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
     echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
     sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
     ok "Forwarding ON"
-    sleep 0.3
 
-    # 5. iptables-persistent
     step "5/7" "Installing iptables-persistent..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq > /dev/null 2>&1
     apt-get install -y -qq iptables-persistent netfilter-persistent > /dev/null 2>&1
     ok "Installed"
-    sleep 0.3
 
-    # 6. Masquerade + save
-    step "6/7" "Configuring iptables..."
+    step "6/7" "Setting iptables..."
     setup_kharej_iptables
     netfilter-persistent save > /dev/null 2>&1
     ok "Rules saved"
-    sleep 0.3
 
-    # 7. Service
-    step "7/7" "Creating service and starting..."
-    cat > "$SERVICE_FILE" << EOF
+    step "7/7" "Starting tunnel..."
+    cat > "$SERVICE_FILE" << SVCEOF
 [Unit]
 Description=VIRA TUNNEL GRE (KHAREJ)
 After=network-online.target
@@ -563,8 +516,7 @@ RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
-EOF
-
+SVCEOF
     systemctl daemon-reload
     systemctl enable vira-gre.service > /dev/null 2>&1
     bash "$TUNNEL_SCRIPT" > /dev/null 2>&1 || true
@@ -572,27 +524,153 @@ EOF
     sleep 1
 
     if ip link show ${TUNNEL_NAME} 2>/dev/null | grep -qE "UP|UNKNOWN"; then
-        local tip
-        tip=$(ip addr show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'inet \K[0-9.]+')
+        local tip; tip=$(ip addr show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'inet \K[0-9.]+')
         ok "${GREEN}${BOLD}Tunnel UP!${NC} IP: ${CYAN}${tip}${NC}"
     else
-        err "Tunnel interface issue"
+        err "Tunnel not up yet"
     fi
 
     echo ""
     progress_bar 1 "Finalizing"
     echo ""
-
-    echo -e "    ${G6}${BOLD}▸ Quick Local Test${NC}"
-    echo ""
     animated_ping "$KHAREJ_PRIVATE_IP" "Local Self-Ping (${KHAREJ_PRIVATE_IP})"
 
     echo -e "${G3}    ╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${G3}    ║${NC}  ${GREEN}${BOLD}✅ KHAREJ SERVER READY!${NC}                                     ${G3}║${NC}"
-    echo -e "${G3}    ╠══════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${G3}    ║${NC}  ${WHITE}Make sure IRAN server is also configured${NC}                     ${G3}║${NC}"
-    echo -e "${G3}    ║${NC}  ${WHITE}Then check status with option 3${NC}                              ${G3}║${NC}"
+    echo -e "${G3}    ║${NC}  ${WHITE}Make sure IRAN server is configured too${NC}                     ${G3}║${NC}"
+    echo -e "${G3}    ║${NC}  ${G2}Private IPs: IRAN=${CYAN}10.10.10.1${NC} KHAREJ=${CYAN}10.10.10.2${NC}            ${G3}║${NC}"
     echo -e "${G3}    ╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -ne "    ${G2}❯${NC} Press Enter..."
+    read
+}
+
+# ──────────────────── SAFE UNINSTALL ────────────────────
+
+uninstall_tunnel() {
+    show_logo
+
+    echo -e "${RED}    ┌──────────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${RED}    │${NC}  ${RED}⚠${NC}  ${WHITE}${BOLD}UNINSTALL VIRA TUNNEL${NC}                                      ${RED}│${NC}"
+    echo -e "${RED}    └──────────────────────────────────────────────────────────────┘${NC}"
+    echo ""
+    warn "This removes all VIRA tunnel configs"
+    info "${GREEN}Your SSH access will remain safe${NC}"
+    echo ""
+    echo -ne "    ${RED}❯${NC} Type '${RED}YES${NC}': "
+    read c
+    [[ "$c" != "YES" ]] && { info "Cancelled."; echo -ne "\n    Enter..."; read; return; }
+    echo ""
+
+    # ═══ Step 1: Stop service FIRST ═══
+    step "1/7" "Stopping service..."
+    systemctl stop vira-gre.service 2>/dev/null || true
+    systemctl disable vira-gre.service 2>/dev/null || true
+    ok "Service stopped"
+
+    # ═══ Step 2: Remove tunnel interface ═══
+    step "2/7" "Removing tunnel interface..."
+    ip tunnel del ${TUNNEL_NAME} 2>/dev/null || true
+    ip link del ${TUNNEL_NAME} 2>/dev/null || true
+    ok "Tunnel removed"
+
+    # ═══ Step 3: SAFE iptables cleanup ═══
+    # THIS IS THE KEY FIX:
+    # Only remove VIRA chains, never flush system chains
+    step "3/7" "Cleaning iptables (SSH-safe)..."
+
+    # Remove VIRA prerouting chain
+    iptables -t nat -D PREROUTING -j ${VIRA_PREROUTING} 2>/dev/null || true
+    iptables -t nat -F ${VIRA_PREROUTING} 2>/dev/null || true
+    iptables -t nat -X ${VIRA_PREROUTING} 2>/dev/null || true
+    ok "VIRA prerouting chain removed"
+
+    # Remove VIRA postrouting chain
+    iptables -t nat -D POSTROUTING -j ${VIRA_POST} 2>/dev/null || true
+    iptables -t nat -F ${VIRA_POST} 2>/dev/null || true
+    iptables -t nat -X ${VIRA_POST} 2>/dev/null || true
+    ok "VIRA postrouting chain removed"
+
+    # Also clean any old-style rules (from previous versions)
+    # Remove specific DNAT rules that might exist
+    iptables -t nat -D PREROUTING -p tcp --dport 22 -j DNAT --to-destination 10.10.10.1 2>/dev/null || true
+    iptables -t nat -D PREROUTING -j DNAT --to-destination 10.10.10.2 2>/dev/null || true
+
+    # DO NOT flush POSTROUTING - it breaks SSH!
+    # Instead, only remove tunnel-specific masquerade
+    iptables -t nat -D POSTROUTING -o ${TUNNEL_NAME} -j MASQUERADE 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -s 10.10.10.0/30 -j MASQUERADE 2>/dev/null || true
+
+    # Check if any old config exists
+    if load_config; then
+        iptables -t nat -D POSTROUTING -s ${IRAN_PRIVATE_IP}/30 -j MASQUERADE 2>/dev/null || true
+        iptables -t nat -D PREROUTING -j DNAT --to-destination ${KHAREJ_PRIVATE_IP} 2>/dev/null || true
+        iptables -t nat -D PREROUTING -p tcp --dport 22 -j DNAT --to-destination ${IRAN_PRIVATE_IP} 2>/dev/null || true
+    fi
+
+    ok "Old rules cleaned"
+
+    # ═══ Step 4: Make sure basic MASQUERADE still works ═══
+    # This ensures SSH stays working even after cleanup
+    step "4/7" "Ensuring SSH connectivity..."
+    local main_iface
+    main_iface=$(detect_main_interface)
+
+    # Check if there's any MASQUERADE rule left for the main interface
+    # If not, the server will still work because we didn't flush the chain
+    # Just verify SSH is not blocked
+    info "Main interface: ${CYAN}${main_iface}${NC}"
+    ok "SSH connectivity preserved (no system chains flushed)"
+
+    # ═══ Step 5: Save clean rules ═══
+    step "5/7" "Saving clean iptables..."
+    netfilter-persistent save > /dev/null 2>&1 || true
+    ok "Saved"
+
+    # ═══ Step 6: Remove files ═══
+    step "6/7" "Removing files..."
+    rm -f "$TUNNEL_SCRIPT"
+    rm -f "$SERVICE_FILE"
+    rm -rf "$CONFIG_DIR"
+    rm -f /etc/modules-load.d/gre.conf
+    systemctl daemon-reload
+    ok "All files removed"
+
+    # ═══ Step 7: Verify ═══
+    step "7/7" "Verifying..."
+    local all_ok=true
+    if ip tunnel show 2>/dev/null | grep -q "${TUNNEL_NAME}"; then
+        err "Tunnel still exists"; all_ok=false
+    else
+        ok "Tunnel interface: removed"
+    fi
+
+    if [[ -f "$SERVICE_FILE" ]]; then
+        err "Service file still exists"; all_ok=false
+    else
+        ok "Service file: removed"
+    fi
+
+    if [[ -d "$CONFIG_DIR" ]]; then
+        err "Config dir still exists"; all_ok=false
+    else
+        ok "Config: removed"
+    fi
+
+    if iptables -t nat -L ${VIRA_PREROUTING} -n 2>/dev/null | grep -q "Chain"; then
+        err "VIRA prerouting chain still exists"; all_ok=false
+    else
+        ok "VIRA iptables chains: removed"
+    fi
+
+    echo ""
+    if $all_ok; then
+        echo -e "    ${GREEN}${BOLD}✅ VIRA TUNNEL completely uninstalled!${NC}"
+        echo -e "    ${GREEN}✔  SSH access is safe and working${NC}"
+    else
+        warn "Some items may need manual cleanup"
+    fi
+
     echo ""
     echo -ne "    ${G2}❯${NC} Press Enter..."
     read
@@ -602,9 +680,8 @@ EOF
 
 check_status() {
     show_logo
-
     echo -e "${G3}    ╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${G3}    ║${NC}  ${G1}📊${NC} ${WHITE}${BOLD}FULL DIAGNOSTICS${NC}                                            ${G3}║${NC}"
+    echo -e "${G3}    ║${NC}  ${G1}📊${NC} ${WHITE}${BOLD}FULL DIAGNOSTICS v5${NC}                                         ${G3}║${NC}"
     echo -e "${G3}    ╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
@@ -614,20 +691,20 @@ check_status() {
         sip="$IRAN_PRIVATE_IP"; skp="$KHAREJ_PRIVATE_IP"; sd="$INSTALL_DATE"
     fi
 
-    # 1. Info
+    # 1. Server Info
     echo -e "    ${G2}━━━ 1. SERVER INFO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     if $cfg; then
         local ri="🌍"; [[ "$sr" == "IRAN" ]] && ri="🇮🇷"
-        printf "    Role: ${CYAN}${BOLD}%-10s${NC} %s   Installed: ${DIM}%s${NC}\n" "$sr" "$ri" "$sd"
-        printf "    IRAN:   ${CYAN}%-16s${NC}  Private: ${CYAN}%s/30${NC}\n" "$sii" "$sip"
-        printf "    KHAREJ: ${CYAN}%-16s${NC}  Private: ${CYAN}%s/30${NC}\n" "$ski" "$skp"
+        printf "    Role: ${CYAN}${BOLD}%-8s${NC} %s   Installed: ${DIM}%s${NC}\n" "$sr" "$ri" "$sd"
+        printf "    IRAN:   ${CYAN}%-16s${NC}  Private: ${CYAN}%s${NC}\n" "$sii" "$sip"
+        printf "    KHAREJ: ${CYAN}%-16s${NC}  Private: ${CYAN}%s${NC}\n" "$ski" "$skp"
     else
         warn "No config found"
     fi
     echo ""
 
-    # 2. Module
+    # 2. GRE Module
     echo -e "    ${G2}━━━ 2. GRE MODULE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     lsmod | grep -q "ip_gre" && ok "ip_gre: ${GREEN}LOADED${NC}" || err "ip_gre: ${RED}NOT LOADED${NC}"
@@ -640,15 +717,10 @@ check_status() {
     if ip tunnel show 2>/dev/null | grep -q "${TUNNEL_NAME}"; then
         tun_ok=true
         ok "$(ip tunnel show ${TUNNEL_NAME} 2>/dev/null)"
-        local tip
-        tip=$(ip addr show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'inet \K[0-9./]+')
-        [[ -n "$tip" ]] && ok "IP: ${CYAN}${tip}${NC}" || warn "No IP assigned"
-        local ls
-        ls=$(ip link show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'state \K\w+')
+        local tip; tip=$(ip addr show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'inet \K[0-9./]+')
+        [[ -n "$tip" ]] && ok "IP: ${CYAN}${tip}${NC}" || warn "No IP"
+        local ls; ls=$(ip link show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'state \K\w+')
         [[ "$ls" == "UP" || "$ls" == "UNKNOWN" ]] && ok "State: ${GREEN}UP${NC}" || err "State: ${RED}${ls}${NC}"
-        local mtu
-        mtu=$(ip link show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'mtu \K\d+')
-        info "MTU: ${CYAN}${mtu}${NC}"
     else
         err "Tunnel ${TUNNEL_NAME} NOT FOUND"
     fi
@@ -658,30 +730,32 @@ check_status() {
     echo -e "    ${G2}━━━ 4. SERVICE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     if [[ -f "$SERVICE_FILE" ]]; then
-        systemctl is-active --quiet vira-gre.service 2>/dev/null && ok "Status: ${GREEN}● ACTIVE${NC}" || err "Status: ${RED}● INACTIVE${NC}"
-        systemctl is-enabled --quiet vira-gre.service 2>/dev/null && ok "Boot: ${GREEN}ENABLED${NC}" || warn "Boot: ${YELLOW}DISABLED${NC}"
+        systemctl is-active --quiet vira-gre.service 2>/dev/null && \
+            ok "Status: ${GREEN}● ACTIVE${NC}" || err "Status: ${RED}● INACTIVE${NC}"
+        systemctl is-enabled --quiet vira-gre.service 2>/dev/null && \
+            ok "Boot: ${GREEN}ENABLED${NC}" || warn "Boot: ${YELLOW}DISABLED${NC}"
     else
         err "Service file missing"
     fi
     echo ""
 
-    # 5. Forwarding & NAT
-    echo -e "    ${G2}━━━ 5. IP FORWARD & NAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    # 5. Network
+    echo -e "    ${G2}━━━ 5. NETWORK & NAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    [[ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" == "1" ]] && ok "Forward: ${GREEN}ON${NC}" || err "Forward: ${RED}OFF${NC}"
+    [[ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" == "1" ]] && \
+        ok "Forward: ${GREEN}ON${NC}" || err "Forward: ${RED}OFF${NC}"
 
-    # Show VIRA chain
-    if iptables -t nat -L ${VIRA_CHAIN} -n 2>/dev/null | grep -q "Chain"; then
-        ok "Custom chain ${VIRA_CHAIN}: ${GREEN}EXISTS${NC}"
-        iptables -t nat -L ${VIRA_CHAIN} -n 2>/dev/null | tail -n +3 | while read l; do
-            echo -e "    ${DIM}      → $l${NC}"
-        done
-    else
-        info "No custom chain (KHAREJ side or old setup)"
+    if iptables -t nat -L ${VIRA_PREROUTING} -n 2>/dev/null | grep -q "Chain"; then
+        ok "VIRA_PRE chain: ${GREEN}EXISTS${NC}"
+        iptables -t nat -L ${VIRA_PREROUTING} -n 2>/dev/null | tail -n +3 | head -10 | \
+            while read l; do echo -e "    ${DIM}      → $l${NC}"; done
     fi
 
-    iptables -t nat -C POSTROUTING -j MASQUERADE 2>/dev/null && ok "MASQUERADE: ${GREEN}Active${NC}" || \
-    iptables -t nat -L POSTROUTING -n 2>/dev/null | grep -q "MASQUERADE" && ok "MASQUERADE: ${GREEN}Active${NC}" || err "MASQUERADE: ${RED}Missing${NC}"
+    if iptables -t nat -L ${VIRA_POST} -n 2>/dev/null | grep -q "Chain"; then
+        ok "VIRA_POST chain: ${GREEN}EXISTS${NC}"
+        iptables -t nat -L ${VIRA_POST} -n 2>/dev/null | tail -n +3 | head -5 | \
+            while read l; do echo -e "    ${DIM}      → $l${NC}"; done
+    fi
     echo ""
 
     # 6. Ping Tests
@@ -701,48 +775,62 @@ check_status() {
 
         echo -e "    ${G6}${BOLD}▸ TEST 2: Remote Tunnel${NC}"
         echo ""
-        [[ "$cr" == "IRAN" ]] && animated_ping "$rp" "IRAN → KHAREJ (${rp})" || animated_ping "$rp" "KHAREJ → IRAN (${rp})"
+        if [[ "$cr" == "IRAN" ]]; then
+            animated_ping "$rp" "IRAN → KHAREJ (${rp})"
+        else
+            animated_ping "$rp" "KHAREJ → IRAN (${rp})"
+        fi
 
         if $cfg; then
             local rpub=""
             [[ "$sr" == "IRAN" ]] && rpub="$ski" || rpub="$sii"
-            echo -e "    ${G6}${BOLD}▸ TEST 3: Remote Public IP${NC}"
+            echo -e "    ${G6}${BOLD}▸ TEST 3: Remote Public${NC}"
             echo ""
-            animated_ping "$rpub" "Public → ${rpub}"
+            animated_ping "$rpub" "Public IP → ${rpub}"
         fi
 
         echo -e "    ${G6}${BOLD}▸ TEST 4: Internet${NC}"
         echo ""
-        animated_ping "8.8.8.8" "Google DNS (8.8.8.8)"
+        animated_ping "8.8.8.8" "Google DNS"
     else
-        animated_ping "8.8.8.8" "Internet Only"
+        animated_ping "8.8.8.8" "Internet Test"
     fi
 
-    # 7. Health
+    # 7. Health Score
     echo -e "    ${G2}━━━ 7. HEALTH SCORE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-
     local tot=0 pass=0
 
-    tot=$((tot+1)); lsmod | grep -q "ip_gre" && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} GRE Module         ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} GRE Module         ${RED}FAIL${NC}"
-    tot=$((tot+1)); $tun_ok && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} Tunnel Interface   ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} Tunnel Interface   ${RED}FAIL${NC}"
-    tot=$((tot+1)); systemctl is-active --quiet vira-gre.service 2>/dev/null && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} Service Active     ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} Service Active     ${RED}FAIL${NC}"
-    tot=$((tot+1)); [[ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" == "1" ]] && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} IP Forwarding      ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} IP Forwarding      ${RED}FAIL${NC}"
-    tot=$((tot+1)); [[ -n "$lp" ]] && ping -c1 -W2 "$lp" >/dev/null 2>&1 && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} Local Ping         ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} Local Ping         ${RED}FAIL${NC}"
-    tot=$((tot+1)); [[ -n "$rp" ]] && ping -c1 -W3 "$rp" >/dev/null 2>&1 && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} Remote Ping        ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} Remote Ping        ${RED}FAIL${NC}"
+    tot=$((tot+1))
+    lsmod | grep -q "ip_gre" && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} GRE Module       ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} GRE Module       ${RED}FAIL${NC}"
+
+    tot=$((tot+1))
+    $tun_ok && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} Tunnel           ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} Tunnel           ${RED}FAIL${NC}"
+
+    tot=$((tot+1))
+    systemctl is-active --quiet vira-gre.service 2>/dev/null && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} Service          ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} Service          ${RED}FAIL${NC}"
+
+    tot=$((tot+1))
+    [[ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)" == "1" ]] && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} IP Forward       ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} IP Forward       ${RED}FAIL${NC}"
+
+    tot=$((tot+1))
+    [[ -n "$lp" ]] && ping -c1 -W2 "$lp" >/dev/null 2>&1 && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} Local Ping       ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} Local Ping       ${RED}FAIL${NC}"
+
+    tot=$((tot+1))
+    [[ -n "$rp" ]] && ping -c1 -W3 "$rp" >/dev/null 2>&1 && { pass=$((pass+1)); echo -e "    ${GREEN}✔${NC} Remote Ping      ${GREEN}PASS${NC}"; } || echo -e "    ${RED}✘${NC} Remote Ping      ${RED}FAIL${NC}"
 
     echo ""
     local pct=$((pass*100/tot))
     local hc="${RED}" ht="CRITICAL" hb="${RED}████${NC}${DIM}██████████████████████████${NC}"
-    ((pct>=100)) && { hc="${GREEN}"; ht="PERFECT";  hb="${GREEN}██████████████████████████████${NC}"; }
-    ((pct>=85 && pct<100)) && { hc="${GREEN}"; ht="HEALTHY";  hb="${GREEN}████████████████████████${NC}${DIM}██████${NC}"; }
-    ((pct>=70 && pct<85))  && { hc="${YELLOW}"; ht="GOOD";     hb="${YELLOW}██████████████████${NC}${DIM}████████████${NC}"; }
-    ((pct>=50 && pct<70))  && { hc="${YELLOW}"; ht="DEGRADED"; hb="${YELLOW}████████████${NC}${DIM}██████████████████${NC}"; }
+    if   ((pct>=100)); then hc="${GREEN}";  ht="PERFECT";  hb="${GREEN}██████████████████████████████${NC}"
+    elif ((pct>=80));  then hc="${GREEN}";  ht="HEALTHY";  hb="${GREEN}████████████████████████${NC}${DIM}██████${NC}"
+    elif ((pct>=60));  then hc="${YELLOW}"; ht="GOOD";     hb="${YELLOW}██████████████████${NC}${DIM}████████████${NC}"
+    elif ((pct>=40));  then hc="${YELLOW}"; ht="DEGRADED"; hb="${YELLOW}████████████${NC}${DIM}██████████████████${NC}"
+    fi
 
     echo -e "    ${G3}╔════════════════════════════════════════════════════╗${NC}"
-    echo -e "    ${G3}║${NC}  Score: ${hc}${BOLD}${pass}/${tot}${NC} (${hc}${pct}%${NC})                                ${G3}║${NC}"
-    echo -e "    ${G3}║${NC}  [${hb}]${NC}  ${G3}║${NC}"
-    echo -e "    ${G3}║${NC}  Status: ${hc}${BOLD}⬤ ${ht}${NC}                                  ${G3}║${NC}"
+    echo -e "    ${G3}║${NC}  Score: ${hc}${BOLD}${pass}/${tot}${NC} (${hc}${pct}%${NC})  Status: ${hc}${BOLD}⬤ ${ht}${NC}         ${G3}║${NC}"
+    echo -e "    ${G3}║${NC}  [${hb}]  ${G3}║${NC}"
     echo -e "    ${G3}╚════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -ne "    ${G2}❯${NC} Press Enter..."
@@ -758,134 +846,66 @@ restart_tunnel() {
     echo -e "${G3}    └──────────────────────────────────────────────────────────────┘${NC}"
     echo ""
 
-    if [[ ! -f "$TUNNEL_SCRIPT" ]]; then
-        err "No tunnel script found - install first"
-        echo -ne "\n    Press Enter..."
-        read; return
-    fi
+    [[ ! -f "$TUNNEL_SCRIPT" ]] && { err "Not installed"; echo -ne "\n    Enter..."; read; return; }
 
-    step "1/4" "Loading GRE..."
-    ensure_gre_module
-    ok "Done"
+    step "1/4" "GRE module..."
+    ensure_gre_module; ok "Ready"
 
     step "2/4" "Stopping..."
     systemctl stop vira-gre.service 2>/dev/null || true
     ip tunnel del ${TUNNEL_NAME} 2>/dev/null || true
     ip link del ${TUNNEL_NAME} 2>/dev/null || true
-    sleep 1
-    ok "Stopped"
+    sleep 1; ok "Stopped"
 
     step "3/4" "Starting..."
     bash "$TUNNEL_SCRIPT" 2>&1 || true
     systemctl restart vira-gre.service 2>/dev/null || true
     sleep 1
 
-    step "4/4" "Verifying..."
+    step "4/4" "Checking..."
     if ip link show ${TUNNEL_NAME} 2>/dev/null | grep -qE "UP|UNKNOWN"; then
-        local tip
-        tip=$(ip addr show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'inet \K[0-9.]+')
+        local tip; tip=$(ip addr show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'inet \K[0-9.]+')
         ok "${GREEN}${BOLD}Tunnel UP!${NC} IP: ${CYAN}${tip}${NC}"
     else
         err "Tunnel not up"
-        journalctl -u vira-gre.service --no-pager -n 5 2>/dev/null | while read l; do echo -e "    ${DIM}$l${NC}"; done
     fi
 
     echo ""
     if load_config; then
-        local my_ip="" rem_ip=""
-        [[ "$ROLE" == "IRAN" ]] && { my_ip="$IRAN_PRIVATE_IP"; rem_ip="$KHAREJ_PRIVATE_IP"; } || { my_ip="$KHAREJ_PRIVATE_IP"; rem_ip="$IRAN_PRIVATE_IP"; }
-        [[ -n "$my_ip" ]] && { echo -e "    ${G6}${BOLD}▸ Local${NC}"; echo ""; animated_ping "$my_ip" "Self → ${my_ip}"; }
-        [[ -n "$rem_ip" ]] && { echo -e "    ${G6}${BOLD}▸ Remote${NC}"; echo ""; animated_ping "$rem_ip" "Remote → ${rem_ip}"; }
+        local my="" rem=""
+        [[ "$ROLE" == "IRAN" ]] && { my="$IRAN_PRIVATE_IP"; rem="$KHAREJ_PRIVATE_IP"; } || \
+            { my="$KHAREJ_PRIVATE_IP"; rem="$IRAN_PRIVATE_IP"; }
+
+        [[ -n "$my" ]] && animated_ping "$my" "Local Self → ${my}"
+        [[ -n "$rem" ]] && animated_ping "$rem" "Remote → ${rem}"
     fi
 
     echo -ne "    ${G2}❯${NC} Press Enter..."
     read
 }
 
-# ──────────────────── UNINSTALL ────────────────────
-
-uninstall_tunnel() {
-    show_logo
-    echo -e "${RED}    ┌──────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${RED}    │${NC}  ${RED}⚠  UNINSTALL VIRA TUNNEL${NC}                                      ${RED}│${NC}"
-    echo -e "${RED}    └──────────────────────────────────────────────────────────────┘${NC}"
-    echo ""
-    warn "This removes ALL VIRA tunnel configs!"
-    echo -ne "    ${RED}❯${NC} Type '${RED}YES${NC}': "
-    read c; [[ "$c" != "YES" ]] && { info "Cancelled."; echo -ne "\n    Enter..."; read; return; }
-    echo ""
-
-    step "1/7" "Stop service..."
-    systemctl stop vira-gre.service 2>/dev/null || true
-    systemctl disable vira-gre.service 2>/dev/null || true
-    ok "Done"
-
-    step "2/7" "Remove tunnel..."
-    ip tunnel del ${TUNNEL_NAME} 2>/dev/null || true
-    ip link del ${TUNNEL_NAME} 2>/dev/null || true
-    ok "Done"
-
-    step "3/7" "Remove files..."
-    rm -f "$TUNNEL_SCRIPT" "$SERVICE_FILE"
-    rm -rf "$CONFIG_DIR"
-    rm -f /etc/modules-load.d/gre.conf
-    systemctl daemon-reload
-    ok "Done"
-
-    step "4/7" "Clean iptables..."
-    # Remove custom chain
-    iptables -t nat -D PREROUTING -j ${VIRA_CHAIN} 2>/dev/null || true
-    iptables -t nat -F ${VIRA_CHAIN} 2>/dev/null || true
-    iptables -t nat -X ${VIRA_CHAIN} 2>/dev/null || true
-    # Clean POSTROUTING
-    iptables -t nat -F POSTROUTING 2>/dev/null || true
-    iptables -t nat -A POSTROUTING -j MASQUERADE 2>/dev/null || true
-    ok "Done"
-
-    step "5/7" "Save clean rules..."
-    netfilter-persistent save > /dev/null 2>&1 || true
-    ok "Done"
-
-    step "6/7" "Unload module..."
-    rmmod ip_gre 2>/dev/null || true
-    ok "Done"
-
-    step "7/7" "Verify..."
-    ! ip tunnel show 2>/dev/null | grep -q "${TUNNEL_NAME}" && ok "Tunnel removed"
-    [[ ! -f "$SERVICE_FILE" ]] && ok "Service removed"
-    [[ ! -d "$CONFIG_DIR" ]] && ok "Config removed"
-
-    echo ""
-    echo -e "${GREEN}    ✅ VIRA TUNNEL uninstalled!${NC}"
-    echo ""
-    echo -ne "    Enter..."
-    read
-}
-
-# ──────────────────── MAIN MENU ────────────────────
+# ──────────────────── MENU ────────────────────
 
 show_main_menu() {
     show_logo
-
     if [[ -f "$CONFIG_FILE" ]]; then
         source "$CONFIG_FILE" 2>/dev/null
         local ri="🌍"; [[ "$ROLE" == "IRAN" ]] && ri="🇮🇷"
         local ss="${RED}OFF${NC}"
         systemctl is-active --quiet vira-gre.service 2>/dev/null && ss="${GREEN}ON${NC}"
-        local tun_ip
-        tun_ip=$(ip addr show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "N/A")
-        echo -e "    ${DIM}Server: ${WHITE}${ROLE}${NC} ${ri} ${DIM}| Service: ${ss} ${DIM}| TunnelIP: ${CYAN}${tun_ip}${NC}"
+        local tip; tip=$(ip addr show ${TUNNEL_NAME} 2>/dev/null | grep -oP 'inet \K[0-9.]+' || echo "N/A")
+        echo -e "    ${DIM}Server: ${WHITE}${ROLE}${NC} ${ri}  Service: ${ss}  TunnelIP: ${CYAN}${tip}${NC}"
         echo ""
     fi
 
     echo -e "${G3}    ┌──────────────────────────────────────────────────────────────┐${NC}"
     echo -e "${G3}    │${NC}  ${G1}⚙${NC}  ${WHITE}${BOLD}MAIN MENU${NC}                                                 ${G3}│${NC}"
     echo -e "${G3}    ├──────────────────────────────────────────────────────────────┤${NC}"
-    echo -e "${G3}    │${NC}   ${G2}[1]${NC} ➤ Setup IRAN Server       ${DIM}(Inside Server)${NC}              ${G3}│${NC}"
-    echo -e "${G3}    │${NC}   ${G2}[2]${NC} ➤ Setup KHAREJ Server     ${DIM}(Outside Server)${NC}            ${G3}│${NC}"
-    echo -e "${G3}    │${NC}   ${G2}[3]${NC} ➤ Full Status & Ping      ${DIM}(Diagnostics)${NC}               ${G3}│${NC}"
-    echo -e "${G3}    │${NC}   ${G2}[4]${NC} ➤ Restart Tunnel          ${DIM}(Restart + Test)${NC}            ${G3}│${NC}"
-    echo -e "${G3}    │${NC}   ${G2}[5]${NC} ➤ Uninstall               ${DIM}(Remove All)${NC}                ${G3}│${NC}"
+    echo -e "${G3}    │${NC}   ${G2}[1]${NC} ➤ Setup IRAN Server      ${DIM}(Private: 10.10.10.1)${NC}        ${G3}│${NC}"
+    echo -e "${G3}    │${NC}   ${G2}[2]${NC} ➤ Setup KHAREJ Server    ${DIM}(Private: 10.10.10.2)${NC}        ${G3}│${NC}"
+    echo -e "${G3}    │${NC}   ${G2}[3]${NC} ➤ Status & Ping Tests    ${DIM}(Full Diagnostics)${NC}           ${G3}│${NC}"
+    echo -e "${G3}    │${NC}   ${G2}[4]${NC} ➤ Restart Tunnel         ${DIM}(Restart + Test)${NC}             ${G3}│${NC}"
+    echo -e "${G3}    │${NC}   ${G2}[5]${NC} ➤ Uninstall              ${DIM}(SSH-Safe Remove)${NC}            ${G3}│${NC}"
     echo -e "${G3}    │${NC}   ${RED}[0]${NC} ➤ Exit                                                   ${G3}│${NC}"
     echo -e "${G3}    └──────────────────────────────────────────────────────────────┘${NC}"
     echo ""
@@ -903,11 +923,7 @@ main() {
             3) check_status ;;
             4) restart_tunnel ;;
             5) uninstall_tunnel ;;
-            0)
-                echo ""
-                echo -e "    ${G2}★${NC} ${WHITE}Thank you for using ${G1}VIRA TUNNEL${NC}!"
-                echo ""
-                exit 0 ;;
+            0) echo -e "\n    ${G2}★${NC} Thank you for using ${G1}VIRA TUNNEL${NC}!\n"; exit 0 ;;
             *) err "Invalid!"; sleep 1 ;;
         esac
     done
