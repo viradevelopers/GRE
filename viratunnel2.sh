@@ -1,5 +1,4 @@
 #!/bin/bash
-if grep -qP '\r$' "$0" 2>/dev/null; then sed -i 's/\r$//' "$0"; exec bash "$0" "$@"; fi
 # ═══════════════════════════════════════════════════════════════════
 #  VIRA TUNNEL v2 — Hybrid Tunnel Manager
 #  iptables + HAProxy + GRE + Hysteria2
@@ -1886,5 +1885,6 @@ main() {
 }
 
 main "$@"
+
 
 
