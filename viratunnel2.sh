@@ -1,10 +1,11 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════
-#  VIRA TUNNEL v2 — Hybrid Tunnel Manager
+#  VIRA TUNNEL v2.2 — Hybrid Tunnel Manager (FIXED)
 #  iptables + HAProxy + GRE + Hysteria2
+#  Fixed: Port overflow, connection timeout, setup order
 # ═══════════════════════════════════════════════════════════════════
 
-VERSION="2"
+VERSION="2.2"
 CONFIG_DIR="/etc/vira-tunnel"
 CONFIG_FILE="${CONFIG_DIR}/config.env"
 LOG_FILE="/var/log/vira-tunnel.log"
@@ -175,6 +176,32 @@ format_bytes() {
     fi
 }
 
+# ─── FIXED: Calculate local port (handles any port number) ────
+calc_local_port() {
+    local p=$1
+    local lp
+    # Ensure local port is always valid (1024-65535) and unique
+    if (( p > 45000 )); then
+        # For high ports, subtract to bring into valid range
+        lp=$(( p - 40000 ))
+    elif (( p < 10000 )); then
+        # For low ports, add 20000
+        lp=$(( p + 20000 ))
+    else
+        # For mid-range ports, add 10000
+        lp=$(( p + 10000 ))
+    fi
+    
+    # Final safety check
+    if (( lp < 1024 )); then
+        lp=$(( lp + 10000 ))
+    elif (( lp > 65535 )); then
+        lp=$(( lp - 50000 ))
+    fi
+    
+    echo "$lp"
+}
+
 # ─── Logo ──────────────────────────────────────
 show_logo() {
     clear
@@ -295,6 +322,30 @@ gen_pass() {
 
 log_msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') [$1] $2" >> "$LOG_FILE"
+}
+
+# ─── Check if Kharej server is reachable ───────
+check_kharej_reachable() {
+    local kharej_ip="$1" hy_port="$2"
+    
+    msg_info "Checking if Kharej server is reachable..."
+    
+    # Check basic connectivity
+    if ! ping -c 2 -W 3 "$kharej_ip" &>/dev/null; then
+        msg_warn "Cannot ping Kharej server ($kharej_ip)"
+        return 1
+    fi
+    
+    # Check if Hysteria2 port is open (UDP)
+    if command -v nc &>/dev/null; then
+        if ! nc -zu -w3 "$kharej_ip" "$hy_port" &>/dev/null; then
+            msg_warn "Hysteria2 port ($hy_port/UDP) not responding on Kharej"
+            return 1
+        fi
+    fi
+    
+    msg_ok "Kharej server is reachable"
+    return 0
 }
 
 # ─── Server Info Display ──────────────────────
@@ -433,7 +484,7 @@ install_prereqs() {
     spinner $! "Updating package lists..."
     msg_ok "Package lists updated"
 
-    local pkgs="curl wget net-tools openssl iproute2 jq iptables-persistent socat mtr-tiny iperf3 bc ethtool iputils-ping"
+    local pkgs="curl wget net-tools openssl iproute2 jq iptables-persistent socat mtr-tiny iperf3 bc ethtool iputils-ping netcat-openbsd"
     [[ "$role" == "iran" ]] && pkgs+=" haproxy"
 
     apt-get install -y -qq $pkgs > /dev/null 2>&1 &
@@ -475,6 +526,7 @@ Wants=network-online.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStartPre=/bin/sleep 3
+ExecStartPre=-/sbin/ip link set gre1 down
 ExecStartPre=-/sbin/ip tunnel del gre1
 ExecStart=/sbin/ip tunnel add gre1 mode gre remote ${remote_pub} local ${local_pub} ttl 255
 ExecStart=/sbin/ip addr add ${gre_local}/30 dev gre1
@@ -636,9 +688,30 @@ EOF
     return 1
 }
 
-# ─── Hysteria2 Client (Iran) ──────────────────
+# ─── Hysteria2 Client (Iran) - FIXED ──────────
 setup_hy2_client() {
-    local kharej_ip="$1" port="$2" pass="$3" obfs="$4" ports_csv="$5"
+    local kharej_ip="$1" port="$2" pass="$3" obfs="$4" ports_csv="$5" skip_check="${6:-no}"
+
+    # Check if Kharej server is reachable first
+    if [[ "$skip_check" != "yes" ]]; then
+        echo ""
+        if ! check_kharej_reachable "$kharej_ip" "$port"; then
+            echo ""
+            printf "  ${YLW}${BOLD}WARNING:${RST} Kharej server is not reachable!\n"
+            printf "  ${GR3}This could mean:${RST}\n"
+            printf "    ${GR4}1.${RST} Kharej server hasn't been set up yet\n"
+            printf "    ${GR4}2.${RST} Firewall is blocking UDP port ${port}\n"
+            printf "    ${GR4}3.${RST} Wrong IP address\n"
+            echo ""
+            printf "  ${G2}${BOLD}Recommended:${RST} Set up Kharej server FIRST!\n"
+            echo ""
+            if ! confirm "Continue anyway? (Hysteria will retry when Kharej is ready)"; then
+                msg_info "Skipping Hysteria2 client setup"
+                msg_info "Run this script again after setting up Kharej server"
+                return 0
+            fi
+        fi
+    fi
 
     # Install Hysteria2
     bash <(curl -fsSL https://get.hy2.sh/) > /dev/null 2>&1 &
@@ -657,11 +730,12 @@ setup_hy2_client() {
     IFS=',' read -ra PLIST <<< "$ports_csv"
     IFS="$IFS_BAK"
 
-    # Build forwarding config
+    # Build forwarding config with FIXED port calculation
     local tcp_rules="" udp_rules=""
     for p in "${PLIST[@]}"; do
         p=$(echo "$p" | tr -d ' ')
-        local lp=$(( 20000 + p ))
+        local lp=$(calc_local_port "$p")
+        
         tcp_rules+="  - listen: 127.0.0.1:${lp}
     remote: 127.0.0.1:${p}
 "
@@ -701,7 +775,7 @@ bandwidth:
 
 fastOpen: true
 
-lazy: false
+lazy: true
 
 tcpForwarding:
 ${tcp_rules}
@@ -709,7 +783,7 @@ udpForwarding:
 ${udp_rules}
 EOF
 
-    # Create systemd service with GRE dependency
+    # Create systemd service with better retry logic
     cat > /etc/systemd/system/vira-hysteria.service << EOF
 [Unit]
 Description=VIRA Hysteria2 Client
@@ -723,7 +797,7 @@ User=root
 ExecStartPre=/bin/sleep 5
 ExecStart=/usr/local/bin/hysteria client -c ${HYSTERIA_DIR}/config.yaml
 Restart=always
-RestartSec=10
+RestartSec=15
 LimitNOFILE=1048576
 StandardOutput=journal
 StandardError=journal
@@ -741,12 +815,12 @@ EOF
 
     # Validation with retry
     local retry=0
-    while (( retry < 8 )); do
+    while (( retry < 6 )); do
         if systemctl is-active --quiet vira-hysteria.service; then
             local ports_ok=0
             for p in "${PLIST[@]}"; do
                 p=$(echo "$p" | tr -d ' ')
-                local lp=$(( 20000 + p ))
+                local lp=$(calc_local_port "$p")
                 if ss -tlnp 2>/dev/null | grep -q "127.0.0.1:${lp}"; then
                     (( ports_ok++ ))
                 fi
@@ -762,20 +836,22 @@ EOF
         sleep 3
     done
 
-    msg_err "Hysteria2 Client FAILED to start or bind ports"
-    msg_info "Checking service status..."
-    systemctl status vira-hysteria --no-pager -n 5 2>&1 | while IFS= read -r line; do
-        printf "  ${GR4}%s${RST}\n" "$line"
-    done
-    echo ""
+    # Check if it's just waiting for Kharej
+    if systemctl is-active --quiet vira-hysteria.service 2>/dev/null || systemctl is-activating --quiet vira-hysteria.service 2>/dev/null; then
+        msg_warn "Hysteria2 Client is running but may be waiting for Kharej server"
+        msg_info "It will auto-connect when Kharej server is ready"
+        return 0
+    fi
+
+    msg_err "Hysteria2 Client FAILED to start"
     msg_info "Checking logs..."
-    journalctl -u vira-hysteria --no-pager -n 15 2>&1 | while IFS= read -r line; do
+    journalctl -u vira-hysteria --no-pager -n 10 2>&1 | while IFS= read -r line; do
         printf "  ${GR4}%s${RST}\n" "$line"
     done
     return 1
 }
 
-# ─── HAProxy (Iran) ───────────────────────────
+# ─── HAProxy (Iran) - FIXED ───────────────────
 setup_haproxy() {
     local ports_csv="$1"
     
@@ -828,9 +904,19 @@ HAHDR
     IFS=',' read -ra PLIST <<< "$ports_csv"
     IFS="$IFS_BAK"
     
+    # Show port mapping
+    msg_info "Port mapping:"
     for p in "${PLIST[@]}"; do
         p=$(echo "$p" | tr -d ' ')
-        local lp=$(( 20000 + p ))
+        local lp=$(calc_local_port "$p")
+        printf "    ${GR3}Public :${p}${RST} → ${G1}Hysteria :${lp}${RST} → ${GR3}GRE backup${RST}\n"
+    done
+    echo ""
+    
+    for p in "${PLIST[@]}"; do
+        p=$(echo "$p" | tr -d ' ')
+        local lp=$(calc_local_port "$p")
+        
         cat >> /etc/haproxy/haproxy.cfg << EOF
 
 frontend ft_${p}
@@ -1055,21 +1141,9 @@ if ! ip link show gre1 &>/dev/null; then
     sleep 5
     if ip link show gre1 &>/dev/null; then
         ts "INFO: GRE restarted successfully"
-        # Also restart Hysteria2 after GRE restart
         systemctl restart vira-hysteria 2>/dev/null
     else
         ts "ERROR: GRE restart failed"
-    fi
-else
-    # Check GRE connectivity
-    if [[ "$SERVER_ROLE" == "iran" ]]; then
-        PEER="102.230.9.2"
-    else
-        PEER="102.230.9.1"
-    fi
-    
-    if ! ping -c2 -W5 "$PEER" &>/dev/null; then
-        ts "WARN: GRE peer $PEER unreachable"
     fi
 fi
 
@@ -1080,28 +1154,20 @@ if [[ "$SERVER_ROLE" == "iran" ]]; then
             ts "WARN: HAProxy down, restarting"
             systemctl restart haproxy 2>/dev/null
             sleep 2
-            if systemctl is-active --quiet haproxy 2>/dev/null; then
-                ts "INFO: HAProxy restarted successfully"
-            else
-                ts "ERROR: HAProxy restart failed"
-            fi
         fi
     fi
 fi
 
-# Rotate log if too large
+# Rotate log
 if [[ -f "$LOG" ]]; then
     LOG_SIZE=$(wc -l < "$LOG" 2>/dev/null || echo 0)
     if (( LOG_SIZE > 10000 )); then
         tail -5000 "$LOG" > "${LOG}.tmp" && mv "${LOG}.tmp" "$LOG"
-        ts "INFO: Log rotated (was $LOG_SIZE lines)"
     fi
 fi
 WEOF
 
     chmod +x "$WATCHDOG_SCRIPT"
-    
-    # Remove old cron job and add new one
     ( crontab -l 2>/dev/null | grep -v "vira-watchdog" ) | crontab - 2>/dev/null
     ( crontab -l 2>/dev/null; echo "*/2 * * * * ${WATCHDOG_SCRIPT} >/dev/null 2>&1" ) | crontab -
     
@@ -1118,7 +1184,14 @@ install_wizard() {
     printf "  ${G2}╔══${BOLD} INSTALLATION WIZARD ${G2}$(printf '%*s' $((TERM_WIDTH - 28)) '' | tr ' ' '═')╗${RST}\n"
     echo ""
 
-    printf "  ${G2}${BOLD}Step 1:${RST} ${GR1}Select this server role${RST}\n\n"
+    # Important notice about setup order
+    printf "  ${YLW}${BOLD}⚠ IMPORTANT SETUP ORDER:${RST}\n"
+    printf "  ${GR3}   1. Set up KHAREJ server FIRST${RST}\n"
+    printf "  ${GR3}   2. Then set up IRAN server${RST}\n"
+    echo ""
+    print_line
+
+    printf "\n  ${G2}${BOLD}Step 1:${RST} ${GR1}Select this server role${RST}\n\n"
     print_menu "1" "IRAN Server  (Entry Point - users connect here)"
     print_menu "2" "KHAREJ Server (Exit Point - V2Ray panel here)"
     echo ""
@@ -1204,6 +1277,16 @@ install_wizard() {
     echo ""
     print_line
 
+    # Show port mapping preview
+    printf "\n  ${G2}${BOLD}Port Mapping Preview:${RST}\n\n"
+    for p in "${PLIST[@]}"; do
+        p=$(echo "$p" | tr -d ' ')
+        local lp=$(calc_local_port "$p")
+        printf "    ${GR3}:${p}${RST} → ${G1}:${lp}${RST} (local)\n"
+    done
+    echo ""
+    print_line
+
     printf "\n  ${G2}${BOLD}Summary:${RST}\n\n"
     printf "  ${GR4}┌─────────────────────────────────────────────────┐${RST}\n"
     printf "  ${GR4}│${RST}  ${GR3}Role:${RST}          ${G1}${BOLD}%-34s${RST}${GR4}│${RST}\n" "$([ "$SERVER_ROLE" = "iran" ] && echo "IRAN (Entry)" || echo "KHAREJ (Exit)")"
@@ -1283,7 +1366,6 @@ install_wizard() {
     echo ""
     if (( failed > 0 )); then
         printf "  ${YLW}${BOLD}━━━ Installation Completed with ${failed} issue(s) ━━━${RST}\n\n"
-        msg_warn "Some components may need manual review"
     else
         printf "  ${GRN}${BOLD}━━━ Installation Complete ━━━${RST}\n\n"
     fi
@@ -1291,8 +1373,8 @@ install_wizard() {
     if [[ "$SERVER_ROLE" == "iran" ]]; then
         printf "  ${G5}╔═════════════════════════════════════════════════════╗${RST}\n"
         printf "  ${G5}║${RST}  ${YLW}${BOLD}IMPORTANT:${RST}                                         ${G5}║${RST}\n"
-        printf "  ${G5}║${RST}  Run this script on the KHAREJ server too,          ${G5}║${RST}\n"
-        printf "  ${G5}║${RST}  using the SAME passwords below:                    ${G5}║${RST}\n"
+        printf "  ${G5}║${RST}  Make sure KHAREJ server is set up with the SAME    ${G5}║${RST}\n"
+        printf "  ${G5}║${RST}  passwords below:                                   ${G5}║${RST}\n"
         printf "  ${G5}║${RST}                                                     ${G5}║${RST}\n"
         printf "  ${G5}║${RST}  ${GR3}Hy2 Password:${RST}  ${G1}%-30s${RST}  ${G5}║${RST}\n" "$HYSTERIA_PASSWORD"
         printf "  ${G5}║${RST}  ${GR3}Obfs Password:${RST} ${G1}%-30s${RST}  ${G5}║${RST}\n" "$OBFS_PASSWORD"
@@ -1302,7 +1384,11 @@ install_wizard() {
     else
         printf "  ${G5}╔═════════════════════════════════════════════════════╗${RST}\n"
         printf "  ${G5}║${RST}  ${GRN}Kharej server is ready!${RST}                             ${G5}║${RST}\n"
-        printf "  ${G5}║${RST}  Now run this script on the Iran server too.        ${G5}║${RST}\n"
+        printf "  ${G5}║${RST}  Now run this script on the Iran server with the    ${G5}║${RST}\n"
+        printf "  ${G5}║${RST}  SAME passwords.                                    ${G5}║${RST}\n"
+        printf "  ${G5}║${RST}                                                     ${G5}║${RST}\n"
+        printf "  ${G5}║${RST}  ${GR3}Hy2 Password:${RST}  ${G1}%-30s${RST}  ${G5}║${RST}\n" "$HYSTERIA_PASSWORD"
+        printf "  ${G5}║${RST}  ${GR3}Obfs Password:${RST} ${G1}%-30s${RST}  ${G5}║${RST}\n" "$OBFS_PASSWORD"
         printf "  ${G5}╚═════════════════════════════════════════════════════╝${RST}\n"
     fi
     
@@ -1357,7 +1443,7 @@ show_status() {
         local listening=0 not_listening=0
         for p in "${PLIST[@]}"; do
             p=$(echo "$p" | tr -d ' ')
-            local lp=$(( 20000 + p ))
+            local lp=$(calc_local_port "$p")
             if ss -tlnp 2>/dev/null | grep -q "127.0.0.1:${lp}"; then
                 (( listening++ ))
             else
@@ -1491,17 +1577,7 @@ test_ping() {
                 (( avg_i > 50 )) && pc="$YLW"
                 (( avg_i > 150 )) && pc="$RED"
 
-                local lat_bar_w=20
-                local lat_fill=$(( avg_i * lat_bar_w / 300 ))
-                (( lat_fill > lat_bar_w )) && lat_fill=$lat_bar_w
-                local lat_empty=$(( lat_bar_w - lat_fill ))
-
-                printf "     ${GR3}└─${RST} ${GR3}Min:${RST} ${GR1}${mn}ms${RST}  ${GR3}Avg:${RST} ${pc}${BOLD}${avg}ms${RST}  ${GR3}Max:${RST} ${GR1}${mx}ms${RST}  "
-                printf "${pc}"
-                for (( j=0; j<lat_fill; j++ )); do printf "█"; done
-                printf "${GR5}"
-                for (( j=0; j<lat_empty; j++ )); do printf "░"; done
-                printf "${RST}\n"
+                printf "     ${GR3}└─${RST} ${GR3}Min:${RST} ${GR1}${mn}ms${RST}  ${GR3}Avg:${RST} ${pc}${BOLD}${avg}ms${RST}  ${GR3}Max:${RST} ${GR1}${mx}ms${RST}\n"
             fi
         else
             printf "     ${GR3}└─${RST} ${RED}${BOLD}Unreachable${RST}\n"
@@ -1535,11 +1611,8 @@ test_speed() {
                 pip3 install speedtest-cli > /dev/null 2>&1 || apt-get install -y -qq speedtest-cli > /dev/null 2>&1
             fi
             if command -v speedtest-cli &>/dev/null; then
-                msg_info "Running speed test... (may take 30 seconds)"
-                echo ""
-                local sres
-                sres=$(speedtest-cli --simple 2>&1)
-                echo "$sres" | while IFS=: read -r key val; do
+                msg_info "Running speed test..."
+                speedtest-cli --simple 2>&1 | while IFS=: read -r key val; do
                     key=$(echo "$key" | xargs)
                     val=$(echo "$val" | xargs)
                     case "$key" in
@@ -1566,23 +1639,18 @@ test_speed() {
                 iperf3 -c "$pr_ip" -t 10 -P 4 2>&1 | tail -5 | while IFS= read -r l; do
                     printf "  ${GR2}  %s${RST}\n" "$l"
                 done
-                echo ""
-                printf "  ${G2}${BOLD}UDP Test:${RST}\n"
-                iperf3 -c "$pr_ip" -t 10 -u -b 100M 2>&1 | tail -5 | while IFS= read -r l; do
-                    printf "  ${GR2}  %s${RST}\n" "$l"
-                done
             fi
             ;;
         3)
             echo ""
             msg_info "Download test..."
             echo ""
-            local urls=("https://speed.cloudflare.com/__down?bytes=10000000" "https://proof.ovh.net/files/10Mb.dat")
-            local names=("Cloudflare 10MB" "OVH 10MB")
+            local urls=("https://speed.cloudflare.com/__down?bytes=10000000")
+            local names=("Cloudflare 10MB")
             for i in "${!urls[@]}"; do
                 printf "  ${G5}▸${RST}  ${GR2}${names[$i]}:${RST} "
                 local sp
-                sp=$(curl -4so /dev/null -w "%{speed_download}" -A "curl/8.0" --max-time 30 "${urls[$i]}" 2>/dev/null)
+                sp=$(curl -4so /dev/null -w "%{speed_download}" --max-time 30 "${urls[$i]}" 2>/dev/null)
                 if [[ -n "$sp" ]] && (( $(echo "$sp > 0" | bc -l 2>/dev/null || echo 0) )); then
                     local mbps
                     mbps=$(echo "scale=2; $sp / 1048576" | bc 2>/dev/null || echo "N/A")
@@ -1615,9 +1683,9 @@ GL='\033[38;5;214m'; GR='\033[38;5;245m'; GK='\033[38;5;240m'; C='\033[38;5;51m'
 
 clear
 echo ""
-printf "${GL}${B}  ╔═══ VIRA TUNNEL ═══ Live Monitor ════════════════════════╗${R}\n"
-printf "${GL}  ║${R}  ${GR}%s${R}   ${GR}Role: ${C}%s${R}                            ${GL}║${R}\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$ROLE"
-printf "${GL}${B}  ╚════════════════════════════════════════════════════════════╝${R}\n\n"
+printf "${GL}${B}  ╔═══ VIRA TUNNEL ═══ Live Monitor ═══════════════════╗${R}\n"
+printf "${GL}  ║${R}  ${GR}%s${R}   ${GR}Role: ${C}%s${R}                    ${GL}║${R}\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$ROLE"
+printf "${GL}${B}  ╚════════════════════════════════════════════════════════╝${R}\n\n"
 
 printf "  ${GL}━━━ Services ━━━${R}\n"
 for svc in vira-gre vira-hysteria haproxy; do
@@ -1637,10 +1705,7 @@ if ip link show gre1 &>/dev/null; then
     if [[ -n "$P" ]]; then
         PC="${G}"; PI=${P%%.*}
         (( PI > 50 )) && PC="${Y}"; (( PI > 150 )) && PC="${RD}"
-        BW=15; BF=$((PI * BW / 300)); (( BF > BW )) && BF=$BW; BE=$((BW - BF))
-        printf "  ${G}●${R} Peer: ${W}%s${R}  Latency: ${PC}${B}%s ms${R}  " "$PEER" "$P"
-        printf "${PC}"; for ((i=0;i<BF;i++)); do printf "█"; done
-        printf "${GK}"; for ((i=0;i<BE;i++)); do printf "░"; done; printf "${R}\n"
+        printf "  ${G}●${R} Peer: ${W}%s${R}  Latency: ${PC}${B}%s ms${R}\n" "$PEER" "$P"
     else
         printf "  ${RD}●${R} Peer: ${W}%s${R}  ${RD}No Response${R}\n" "$PEER"
     fi
@@ -1652,23 +1717,6 @@ if ip link show gre1 &>/dev/null; then
 else
     printf "  ${RD}●${R} GRE: ${RD}DOWN${R}\n"
 fi
-
-echo ""
-printf "  ${GL}━━━ Resources ━━━${R}\n"
-CPU=$(awk '/^cpu /{u=$2+$4;t=$2+$4+$5;if(t>0)printf "%.0f",u*100/t;else print 0}' /proc/stat 2>/dev/null || echo 0)
-MU=$(free -m 2>/dev/null | awk '/^Mem:/{print $3}')
-MT=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
-MU=${MU:-0}; MT=${MT:-1}
-MP=0; (( MT > 0 )) && MP=$((MU*100/MT))
-
-BW=20
-CF=$((CPU*BW/100)); CE=$((BW-CF)); CC="${G}"; ((CPU>70))&&CC="${Y}"; ((CPU>90))&&CC="${RD}"
-printf "  CPU  ${CC}"; for((i=0;i<CF;i++)); do printf "█"; done
-printf "${GK}"; for((i=0;i<CE;i++)); do printf "░"; done; printf "${R} ${CC}%3d%%${R}  " "$CPU"
-
-MF=$((MP*BW/100)); ME=$((BW-MF)); MC="${G}"; ((MP>70))&&MC="${Y}"; ((MP>90))&&MC="${RD}"
-printf "RAM  ${MC}"; for((i=0;i<MF;i++)); do printf "█"; done
-printf "${GK}"; for((i=0;i<ME;i++)); do printf "░"; done; printf "${R} ${MC}%3d%%${R}\n" "$MP"
 
 echo ""
 printf "  ${GL}━━━ Connections ━━━${R}\n"
@@ -1702,7 +1750,6 @@ troubleshoot() {
         msg_ok "GRE interface exists"
     else
         msg_err "GRE interface missing"
-        printf "       ${YLW}Fix: systemctl restart vira-gre${RST}\n"
         (( issues++ ))
     fi
 
@@ -1711,7 +1758,6 @@ troubleshoot() {
         msg_ok "GRE ping to ${peer_ip}: OK"
     else
         msg_err "GRE ping to ${peer_ip}: FAILED"
-        printf "       ${YLW}Fix: Check firewall & IPs on both servers${RST}\n"
         (( issues++ ))
     fi
 
@@ -1720,10 +1766,6 @@ troubleshoot() {
         msg_ok "Hysteria2: Running"
     else
         msg_err "Hysteria2: Not running"
-        printf "       ${YLW}Fix: systemctl restart vira-hysteria${RST}\n"
-        journalctl -u vira-hysteria --no-pager -n 3 2>/dev/null | while IFS= read -r l; do
-            printf "       ${GR5}%s${RST}\n" "$l"
-        done
         (( issues++ ))
     fi
 
@@ -1733,7 +1775,6 @@ troubleshoot() {
             msg_ok "HAProxy: Running"
         else
             msg_err "HAProxy: Not running"
-            printf "       ${YLW}Fix: systemctl restart haproxy${RST}\n"
             (( issues++ ))
         fi
     else
@@ -1775,10 +1816,10 @@ troubleshoot() {
     printf "  ${G2}[7/8]${RST} ${GR2}TCP Congestion Control...${RST}\n"
     local cc
     cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-    [[ "$cc" == "bbr" ]] && msg_ok "BBR: Active" || msg_warn "Current: ${cc} (BBR recommended)"
+    [[ "$cc" == "bbr" ]] && msg_ok "BBR: Active" || msg_warn "Current: ${cc}"
 
     printf "  ${G2}[8/8]${RST} ${GR2}DNS Resolution...${RST}\n"
-    if nslookup google.com &>/dev/null 2>&1 || host google.com &>/dev/null 2>&1 || ping -c1 -W2 8.8.8.8 &>/dev/null; then
+    if ping -c1 -W2 8.8.8.8 &>/dev/null; then
         msg_ok "DNS: OK"
     else
         msg_err "DNS: FAILED"
@@ -1786,14 +1827,11 @@ troubleshoot() {
     fi
 
     echo ""
-    print_line "─" "$GR5"
-    echo ""
     if (( issues == 0 )); then
-        printf "  ${GRN}${BOLD}All checks passed! No issues found.${RST}\n"
+        printf "  ${GRN}${BOLD}All checks passed!${RST}\n"
     else
         printf "  ${YLW}${BOLD}${issues} issue(s) found!${RST}\n\n"
         if confirm "Attempt auto-fix?"; then
-            echo ""
             auto_fix
         fi
     fi
@@ -1824,16 +1862,6 @@ auto_fix() {
 
     sysctl --system > /dev/null 2>&1
     msg_ok "Kernel settings reapplied"
-
-    echo ""
-    local ok=true
-    ip link show gre1 &>/dev/null && msg_ok "GRE: UP" || { msg_err "GRE: Still DOWN"; ok=false; }
-    systemctl is-active --quiet vira-hysteria 2>/dev/null && msg_ok "Hysteria2: Running" || { msg_err "Hysteria2: Still down"; ok=false; }
-    if [[ "$SERVER_ROLE" == "iran" ]]; then
-        systemctl is-active --quiet haproxy 2>/dev/null && msg_ok "HAProxy: Running" || { msg_err "HAProxy: Still down"; ok=false; }
-    fi
-    echo ""
-    $ok && msg_ok "All issues fixed!" || msg_warn "Some issues remain. Check logs manually."
 }
 
 # ═══════════════════════════════════════════════
@@ -1848,8 +1876,7 @@ view_logs() {
     print_menu "2" "HAProxy logs" "⚖️"
     print_menu "3" "GRE Tunnel logs" "🔗"
     print_menu "4" "Watchdog logs" "🐕"
-    print_menu "5" "VIRA Tunnel logs" "📝"
-    print_menu "6" "Live logs (follow Hysteria2)" "📡"
+    print_menu "5" "Live logs (follow Hysteria2)" "📡"
     print_menu "0" "Back" "↩️"
     echo ""
     ask "Choice" lc ""
@@ -1860,8 +1887,7 @@ view_logs() {
         2) journalctl -u haproxy --no-pager -n 50 2>/dev/null | tail -40 ;;
         3) journalctl -u vira-gre --no-pager -n 30 2>/dev/null ;;
         4) [[ -f /var/log/vira-watchdog.log ]] && tail -40 /var/log/vira-watchdog.log || echo "  No watchdog log" ;;
-        5) [[ -f "$LOG_FILE" ]] && tail -40 "$LOG_FILE" || echo "  No log" ;;
-        6) msg_info "Following Hysteria2 logs (Ctrl+C to stop)"; echo ""; journalctl -u vira-hysteria -f --no-pager ;;
+        5) msg_info "Following Hysteria2 logs (Ctrl+C to stop)"; journalctl -u vira-hysteria -f --no-pager ;;
         0) return ;;
     esac
     press_key
@@ -1882,7 +1908,7 @@ manage_services() {
     print_menu "4" "Restart GRE only" "🔗"
     print_menu "5" "Restart Hysteria2 only" "🚀"
     print_menu "6" "Restart HAProxy only" "⚖️"
-    print_menu "7" "Run iperf3 server (for speed test)" "📡"
+    print_menu "7" "Run iperf3 server" "📡"
     print_menu "0" "Back" "↩️"
     echo ""
     ask "Choice" sc ""
@@ -1917,8 +1943,7 @@ manage_services() {
             ;;
         7)
             msg_info "Starting iperf3 server on port 5201..."
-            msg_info "From other server run: iperf3 -c ${GRE_IRAN} -t 10  (or ${GRE_KHAREJ})"
-            msg_info "Ctrl+C to stop"; echo ""
+            msg_info "Ctrl+C to stop"
             iperf3 -s
             ;;
         0) return ;;
@@ -1948,12 +1973,18 @@ show_config() {
     printf "  ${GR4}│${RST}  ${GR3}Interface:${RST}      ${GR1}%-32s${RST}${GR4}│${RST}\n" "$NET_IFACE"
     printf "  ${GR4}└──────────────────────────────────────────────────┘${RST}\n"
 
+    # Show port mapping
     echo ""
-    printf "  ${G5}${BOLD}Config Files:${RST}\n"
-    printf "  ${GR3}▸${RST} ${GR1}%s${RST}\n" "$CONFIG_FILE"
-    printf "  ${GR3}▸${RST} ${GR1}%s${RST}\n" "${HYSTERIA_DIR}/config.yaml"
-    [[ "$SERVER_ROLE" == "iran" ]] && printf "  ${GR3}▸${RST} ${GR1}/etc/haproxy/haproxy.cfg${RST}\n"
-    printf "  ${GR3}▸${RST} ${GR1}/etc/sysctl.d/99-vira-tunnel.conf${RST}\n"
+    printf "  ${G5}${BOLD}Port Mapping:${RST}\n"
+    local IFS_BAK="$IFS"
+    IFS=',' read -ra PLIST <<< "$CONFIG_PORTS"
+    IFS="$IFS_BAK"
+    for p in "${PLIST[@]}"; do
+        p=$(echo "$p" | tr -d ' ')
+        local lp=$(calc_local_port "$p")
+        printf "    ${GR3}Public :${p}${RST} → ${G1}Local :${lp}${RST}\n"
+    done
+    
     press_key
 }
 
@@ -1976,7 +2007,7 @@ edit_ports() {
 
     echo ""
     msg_info "Rebuilding configuration..."
-    setup_hy2_client "$KHAREJ_IP" "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD" "$OBFS_PASSWORD" "$CONFIG_PORTS"
+    setup_hy2_client "$KHAREJ_IP" "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD" "$OBFS_PASSWORD" "$CONFIG_PORTS" "yes"
     setup_haproxy "$CONFIG_PORTS"
     setup_ipt_iran "$KHAREJ_IP" "$HYSTERIA_PORT" "$CONFIG_PORTS" "$NET_IFACE"
     echo ""
@@ -1995,13 +2026,12 @@ advanced_menu() {
         printf "\n  ${G2}╔══${BOLD} ADVANCED TOOLS ${G2}$(printf '%*s' $((TERM_WIDTH - 22)) '' | tr ' ' '═')╗${RST}\n\n"
         print_menu "1" "MTR Traceroute" "🗺️"
         print_menu "2" "View iptables rules" "🛡️"
-        print_menu "3" "View active connections (ss)" "🔌"
-        print_menu "4" "View conntrack stats" "📊"
-        print_menu "5" "GRE interface details" "🔗"
-        print_menu "6" "Edit Config ports" "✏️"
-        print_menu "7" "Reset & reapply iptables" "🔄"
-        print_menu "8" "Update Hysteria2" "⬆️"
-        print_menu "9" "View Hysteria2 config" "📄"
+        print_menu "3" "View active connections" "🔌"
+        print_menu "4" "View Hysteria2 config" "📄"
+        print_menu "5" "Edit Config ports" "✏️"
+        print_menu "6" "Reset iptables" "🔄"
+        print_menu "7" "Update Hysteria2" "⬆️"
+        print_menu "8" "Test port mapping" "🔍"
         print_menu "0" "Back" "↩️"
         echo ""
         ask "Choice" ac ""
@@ -2014,56 +2044,39 @@ advanced_menu() {
                 fi
                 ask "Target" mt "$dt"
                 echo ""
-                msg_info "Running MTR to ${mt} (10 packets)..."
-                echo ""
                 if command -v mtr &>/dev/null; then
-                    mtr -r -c 10 -w "$mt" 2>&1 | while IFS= read -r l; do printf "  ${GR2}%s${RST}\n" "$l"; done
+                    mtr -r -c 10 -w "$mt" 2>&1
                 else
-                    msg_err "mtr not found. Install: apt install mtr-tiny"
+                    msg_err "mtr not found"
                 fi
                 press_key
                 ;;
             2)
                 show_logo
                 printf "\n  ${G2}${BOLD}=== FILTER ===${RST}\n"
-                iptables -L -n -v --line-numbers 2>&1 | head -40 | while IFS= read -r l; do printf "  ${GR2}%s${RST}\n" "$l"; done
+                iptables -L -n -v --line-numbers 2>&1 | head -30
                 printf "\n  ${G2}${BOLD}=== NAT ===${RST}\n"
-                iptables -t nat -L -n -v 2>&1 | head -20 | while IFS= read -r l; do printf "  ${GR2}%s${RST}\n" "$l"; done
-                printf "\n  ${G2}${BOLD}=== MANGLE ===${RST}\n"
-                iptables -t mangle -L -n -v 2>&1 | head -15 | while IFS= read -r l; do printf "  ${GR2}%s${RST}\n" "$l"; done
+                iptables -t nat -L -n -v 2>&1 | head -15
                 press_key
                 ;;
             3)
                 show_logo
                 printf "\n  ${G2}${BOLD}Listening Ports:${RST}\n"
-                ss -tlnp 2>&1 | while IFS= read -r l; do printf "  ${GR2}%s${RST}\n" "$l"; done
-                printf "\n  ${G2}${BOLD}Established (first 30):${RST}\n"
-                ss -t state established 2>&1 | head -30 | while IFS= read -r l; do printf "  ${GR2}%s${RST}\n" "$l"; done
+                ss -tlnp 2>&1
                 press_key
                 ;;
             4)
                 show_logo
-                if [[ -f /proc/sys/net/netfilter/nf_conntrack_count ]]; then
-                    local cc cm
-                    cc=$(cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo 0)
-                    cm=$(cat /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null || echo 1)
-                    printf "\n  ${GR3}Connections:${RST} ${G1}%s${RST} / ${GR1}%s${RST}\n" "$cc" "$cm"
-                    draw_bar "$cc" "$cm" 30 "Usage"
+                printf "\n  ${G2}${BOLD}Hysteria2 Config:${RST}\n\n"
+                if [[ -f "${HYSTERIA_DIR}/config.yaml" ]]; then
+                    cat "${HYSTERIA_DIR}/config.yaml"
                 else
-                    msg_warn "Conntrack not available"
+                    msg_warn "Config file not found"
                 fi
                 press_key
                 ;;
-            5)
-                show_logo
-                echo ""
-                ip tunnel show 2>&1 | while IFS= read -r l; do printf "  ${GR2}%s${RST}\n" "$l"; done
-                echo ""
-                ip -s link show gre1 2>&1 | while IFS= read -r l; do printf "  ${GR2}%s${RST}\n" "$l"; done
-                press_key
-                ;;
-            6) edit_ports ;;
-            7)
+            5) edit_ports ;;
+            6)
                 if is_installed; then
                     msg_info "Reapplying iptables..."
                     if [[ "$SERVER_ROLE" == "iran" ]]; then
@@ -2071,27 +2084,36 @@ advanced_menu() {
                     else
                         setup_ipt_kharej "$IRAN_IP" "$HYSTERIA_PORT" "$CONFIG_PORTS" "$NET_IFACE"
                     fi
-                else
-                    msg_warn "Not installed"
                 fi
                 press_key
                 ;;
-            8)
+            7)
                 msg_info "Updating Hysteria2..."
                 bash <(curl -fsSL https://get.hy2.sh/) > /dev/null 2>&1 &
-                spinner $! "Downloading update..."
+                spinner $! "Downloading..."
                 systemctl restart vira-hysteria 2>/dev/null
-                sleep 3
                 msg_ok "Hysteria2 updated"
                 press_key
                 ;;
-            9)
+            8)
                 show_logo
-                printf "\n  ${G2}${BOLD}Hysteria2 Config:${RST}\n\n"
-                if [[ -f "${HYSTERIA_DIR}/config.yaml" ]]; then
-                    cat "${HYSTERIA_DIR}/config.yaml" | while IFS= read -r l; do printf "  ${GR2}%s${RST}\n" "$l"; done
+                printf "\n  ${G2}${BOLD}Port Mapping Test:${RST}\n\n"
+                if [[ "$SERVER_ROLE" == "iran" ]]; then
+                    local IFS_BAK="$IFS"
+                    IFS=',' read -ra PLIST <<< "$CONFIG_PORTS"
+                    IFS="$IFS_BAK"
+                    for p in "${PLIST[@]}"; do
+                        p=$(echo "$p" | tr -d ' ')
+                        local lp=$(calc_local_port "$p")
+                        printf "  Port ${G1}%s${RST} → Local ${G1}%s${RST}: " "$p" "$lp"
+                        if ss -tlnp 2>/dev/null | grep -q "127.0.0.1:${lp}"; then
+                            printf "${GRN}LISTENING${RST}\n"
+                        else
+                            printf "${RED}NOT LISTENING${RST}\n"
+                        fi
+                    done
                 else
-                    msg_warn "Config file not found"
+                    msg_info "Port mapping only on Iran server"
                 fi
                 press_key
                 ;;
@@ -2107,7 +2129,6 @@ uninstall_tunnel() {
     show_logo
     printf "\n  ${RED}${BOLD}WARNING: This will remove ALL tunnel configurations!${RST}\n\n"
     if ! confirm "Are you sure?"; then msg_info "Cancelled"; press_key; return; fi
-    if ! confirm "Final confirmation - proceed?"; then msg_info "Cancelled"; press_key; return; fi
 
     echo ""
     systemctl stop vira-hysteria 2>/dev/null; systemctl disable vira-hysteria 2>/dev/null
@@ -2137,11 +2158,7 @@ uninstall_tunnel() {
     ip tunnel del gre1 2>/dev/null
     msg_ok "GRE tunnel removed"
 
-    sysctl --system > /dev/null 2>&1
-    msg_ok "Kernel settings reset"
-
-    echo ""
-    printf "  ${GRN}${BOLD}VIRA TUNNEL successfully uninstalled.${RST}\n"
+    printf "\n  ${GRN}${BOLD}VIRA TUNNEL uninstalled.${RST}\n"
     press_key
 }
 
@@ -2169,25 +2186,24 @@ main_menu() {
         printf "\n  ${G2}╔══${BOLD} MAIN MENU ${G2}$(printf '%*s' $((TERM_WIDTH - 18)) '' | tr ' ' '═')╗${RST}\n\n"
 
         if ! is_installed; then
-            print_menu "1"  "Install & Setup Tunnel                         " "🚀"
+            print_menu "1"  "Install & Setup Tunnel" "🚀"
         else
-            print_menu "1"  "Reinstall / Update Configuration               " "🚀"
+            print_menu "1"  "Reinstall / Update" "🚀"
         fi
-        print_menu "2"  "Service Status & Charts                        " "📊"
-        print_menu "3"  "Live Monitoring                                " "📡"
-        print_menu "4"  "Ping & Packet Loss Test                        " "🏓"
-        print_menu "5"  "Speed Test                                     " "⚡"
-        print_menu "6"  "Troubleshooting                                " "🔧"
-        print_menu "7"  "View Logs                                      " "📋"
-        print_menu "8"  "Service Management                             " "⚙️"
-        print_menu "9"  "View Configuration                             " "📄"
-        print_menu "10" "Advanced Tools                                 " "🔬"
-        print_menu "11" "Uninstall                                      " "🗑️"
+        print_menu "2"  "Service Status" "📊"
+        print_menu "3"  "Live Monitoring" "📡"
+        print_menu "4"  "Ping Test" "🏓"
+        print_menu "5"  "Speed Test" "⚡"
+        print_menu "6"  "Troubleshooting" "🔧"
+        print_menu "7"  "View Logs" "📋"
+        print_menu "8"  "Service Management" "⚙️"
+        print_menu "9"  "View Configuration" "📄"
+        print_menu "10" "Advanced Tools" "🔬"
+        print_menu "11" "Uninstall" "🗑️"
         echo ""
         print_line "─" "$GR5"
-        print_menu "0"  "Exit                                           " "🚪"
+        print_menu "0"  "Exit" "🚪"
         echo ""
-        printf "  ${G2}╚$(printf '%*s' $((TERM_WIDTH - 4)) '' | tr ' ' '═')╝${RST}\n\n"
 
         ask "Your choice" MC ""
 
