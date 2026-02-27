@@ -1,11 +1,11 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════
-#  VIRA TUNNEL v3.7 — Hybrid Tunnel Manager
+#  VIRA TUNNEL v2 — Hybrid Tunnel Manager
 #  iptables + HAProxy + GRE + Hysteria2
 #  Designed for Ubuntu 22.04
 # ═══════════════════════════════════════════════════════════════════
 
-VERSION="3.7"
+VERSION="2"
 CONFIG_DIR="/etc/vira-tunnel"
 CONFIG_FILE="${CONFIG_DIR}/config.env"
 LOG_FILE="/var/log/vira-tunnel.log"
@@ -1885,3 +1885,4 @@ main() {
 }
 
 main "$@"
+
