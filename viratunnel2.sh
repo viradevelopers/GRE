@@ -893,11 +893,11 @@ install_wizard() {
 
     echo ""; print_line
 
-    printf "\n  ${G2}${BOLD}Step 4:${RST} ${GR1}V2Ray Panel Ports${RST}\n\n"
+    printf "\n  ${G2}${BOLD}Step 4:${RST} ${GR1}Config Panel Ports${RST}\n\n"
     msg_info "Enter ports used by your V2Ray panel (comma-separated)"
     msg_info "Example: 443,80,8443,2053,2083,2087,2096,54321"
     echo ""
-    ask "V2Ray ports" CONFIG_PORTS "443,80,8443,2053,2083,2087,2096,54321"
+    ask "Config ports" CONFIG_PORTS "443,80,8443,2053,2083,2087,2096,54321"
 
     NET_IFACE=$(detect_interface)
 
@@ -911,7 +911,7 @@ install_wizard() {
     printf "  ${GR4}│${RST}  ${GR3}GRE Iran:${RST}      ${GR1}%-34s${RST}${GR4}│${RST}\n" "$GRE_IRAN"
     printf "  ${GR4}│${RST}  ${GR3}GRE Kharej:${RST}    ${GR1}%-34s${RST}${GR4}│${RST}\n" "$GRE_KHAREJ"
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Port:${RST}      ${GR1}%-34s${RST}${GR4}│${RST}\n" "$HYSTERIA_PORT"
-    printf "  ${GR4}│${RST}  ${GR3}V2Ray Ports:${RST}   ${GR1}%-34s${RST}${GR4}│${RST}\n" "$CONFIG_PORTS"
+    printf "  ${GR4}│${RST}  ${GR3}Config Ports:${RST}   ${GR1}%-34s${RST}${GR4}│${RST}\n" "$CONFIG_PORTS"
     printf "  ${GR4}│${RST}  ${GR3}Interface:${RST}     ${GR1}%-34s${RST}${GR4}│${RST}\n" "$NET_IFACE"
     printf "  ${GR4}└─────────────────────────────────────────────────┘${RST}\n"
     echo ""
@@ -1611,7 +1611,7 @@ show_config() {
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Port:${RST}       ${GR1}%-32s${RST}${GR4}│${RST}\n" "$HYSTERIA_PORT"
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Password:${RST}   ${G5}%-32s${RST}${GR4}│${RST}\n" "$HYSTERIA_PASSWORD"
     printf "  ${GR4}│${RST}  ${GR3}Obfs Password:${RST}  ${G5}%-32s${RST}${GR4}│${RST}\n" "$OBFS_PASSWORD"
-    printf "  ${GR4}│${RST}  ${GR3}V2Ray Ports:${RST}    ${GR1}%-32s${RST}${GR4}│${RST}\n" "$CONFIG_PORTS"
+    printf "  ${GR4}│${RST}  ${GR3}Config Ports:${RST}    ${GR1}%-32s${RST}${GR4}│${RST}\n" "$CONFIG_PORTS"
     printf "  ${GR4}│${RST}  ${GR3}Interface:${RST}      ${GR1}%-32s${RST}${GR4}│${RST}\n" "$NET_IFACE"
     printf "  ${GR4}└──────────────────────────────────────────────────┘${RST}\n"
 
@@ -1665,7 +1665,7 @@ advanced_menu() {
         print_menu "3" "View active connections (ss)" "🔌"
         print_menu "4" "View conntrack stats" "📊"
         print_menu "5" "GRE interface details" "🔗"
-        print_menu "6" "Edit V2Ray ports" "✏️"
+        print_menu "6" "Edit Config ports" "✏️"
         print_menu "7" "Reset & reapply iptables" "🔄"
         print_menu "8" "Update Hysteria2" "⬆️"
         print_menu "0" "Back" "↩️"
