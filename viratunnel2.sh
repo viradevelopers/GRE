@@ -1,16 +1,21 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════
-#  VIRA TUNNEL v2 — Hybrid Tunnel Manager
+#  VIRA TUNNEL v3.7 — Hybrid Tunnel Manager
 #  iptables + HAProxy + GRE + Hysteria2
 #  Designed for Ubuntu 22.04
 # ═══════════════════════════════════════════════════════════════════
 
-VERSION="2"
+VERSION="3.7"
 CONFIG_DIR="/etc/vira-tunnel"
 CONFIG_FILE="${CONFIG_DIR}/config.env"
 LOG_FILE="/var/log/vira-tunnel.log"
 HYSTERIA_DIR="/etc/hysteria"
 WATCHDOG_SCRIPT="/usr/local/bin/vira-watchdog.sh"
+
+# GRE Private IPs
+GRE_IRAN="102.230.9.1"
+GRE_KHAREJ="102.230.9.2"
+GRE_SUBNET="102.230.9.0/30"
 
 # ─── Color Palette ─────────────────────────────
 RST='\033[0m'
@@ -335,19 +340,16 @@ show_server_info() {
 
     local bar_w=18
 
-    # CPU bar
     local cpu_filled=$(( cpu_pct * bar_w / 100 ))
     (( cpu_filled > bar_w )) && cpu_filled=$bar_w
     local cpu_empty=$(( bar_w - cpu_filled ))
     local cpu_c="$GRN"; (( cpu_pct > 70 )) && cpu_c="$YLW"; (( cpu_pct > 90 )) && cpu_c="$RED"
 
-    # RAM bar
     local ram_filled=$(( mem_pct * bar_w / 100 ))
     (( ram_filled > bar_w )) && ram_filled=$bar_w
     local ram_empty=$(( bar_w - ram_filled ))
     local ram_c="$GRN"; (( mem_pct > 70 )) && ram_c="$YLW"; (( mem_pct > 90 )) && ram_c="$RED"
 
-    # DISK bar
     local dsk_filled=$(( disk_pct * bar_w / 100 ))
     (( dsk_filled > bar_w )) && dsk_filled=$bar_w
     local dsk_empty=$(( bar_w - dsk_filled ))
@@ -450,9 +452,11 @@ setup_gre() {
     local role="$1" local_pub="$2" remote_pub="$3"
     local gre_local gre_remote
     if [[ "$role" == "iran" ]]; then
-        gre_local="10.0.0.1"; gre_remote="10.0.0.2"
+        gre_local="$GRE_IRAN"
+        gre_remote="$GRE_KHAREJ"
     else
-        gre_local="10.0.0.2"; gre_remote="10.0.0.1"
+        gre_local="$GRE_KHAREJ"
+        gre_remote="$GRE_IRAN"
     fi
 
     ip tunnel del gre1 2>/dev/null || true
@@ -730,7 +734,7 @@ backend bk_${p}
     balance first
     option tcp-check
     server hy2-${p} 127.0.0.1:${lp} check inter 3s fall 3 rise 2 weight 100
-    server gre-${p} 10.0.0.2:${p} check inter 3s fall 3 rise 2 weight 50 backup
+    server gre-${p} ${GRE_KHAREJ}:${p} check inter 3s fall 3 rise 2 weight 50 backup
 EOF
     done
 
@@ -766,7 +770,7 @@ setup_ipt_iran() {
     iptables -A OUTPUT -p udp --dport "${hy_port}" -d "${kharej_ip}" -j ACCEPT
     iptables -A FORWARD -i gre1 -j ACCEPT
     iptables -A FORWARD -o gre1 -j ACCEPT
-    iptables -t nat -A POSTROUTING -s 10.0.0.0/30 -j MASQUERADE
+    iptables -t nat -A POSTROUTING -s ${GRE_SUBNET} -j MASQUERADE
     iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360
     iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
@@ -799,7 +803,7 @@ setup_ipt_kharej() {
     iptables -A INPUT -p udp --dport "${hy_port}" -j ACCEPT
     iptables -A FORWARD -i gre1 -j ACCEPT
     iptables -A FORWARD -o gre1 -j ACCEPT
-    iptables -t nat -A POSTROUTING -s 10.0.0.0/30 -o "${iface}" -j MASQUERADE
+    iptables -t nat -A POSTROUTING -s ${GRE_SUBNET} -o "${iface}" -j MASQUERADE
     iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
 
@@ -816,14 +820,14 @@ setup_ipt_kharej() {
 
 # ─── Watchdog ──────────────────────────────────
 setup_watchdog() {
-    cat > "$WATCHDOG_SCRIPT" << 'WEOF'
+    cat > "$WATCHDOG_SCRIPT" << WEOF
 #!/bin/bash
 LOG="/var/log/vira-watchdog.log"
-ts() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG"; }
+ts() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$1" >> "\$LOG"; }
 if ! systemctl is-active --quiet vira-hysteria 2>/dev/null; then
     ts "WARN: Hysteria2 down, restarting"; systemctl restart vira-hysteria 2>/dev/null
 fi
-if ! ping -c1 -W3 10.0.0.2 &>/dev/null && ! ping -c1 -W3 10.0.0.1 &>/dev/null; then
+if ! ping -c1 -W3 ${GRE_KHAREJ} &>/dev/null && ! ping -c1 -W3 ${GRE_IRAN} &>/dev/null; then
     ts "WARN: GRE down, restarting"; systemctl restart vira-gre 2>/dev/null
 fi
 if systemctl list-units --type=service 2>/dev/null | grep -q haproxy; then
@@ -831,7 +835,7 @@ if systemctl list-units --type=service 2>/dev/null | grep -q haproxy; then
         ts "WARN: HAProxy down, restarting"; systemctl restart haproxy 2>/dev/null
     fi
 fi
-[[ $(wc -l < "$LOG" 2>/dev/null || echo 0) -gt 10000 ]] && tail -5000 "$LOG" > "${LOG}.tmp" && mv "${LOG}.tmp" "$LOG"
+[[ \$(wc -l < "\$LOG" 2>/dev/null || echo 0) -gt 10000 ]] && tail -5000 "\$LOG" > "\${LOG}.tmp" && mv "\${LOG}.tmp" "\$LOG"
 WEOF
     chmod +x "$WATCHDOG_SCRIPT"
     ( crontab -l 2>/dev/null | grep -v "vira-watchdog"; echo "*/2 * * * * ${WATCHDOG_SCRIPT}" ) | crontab -
@@ -848,7 +852,6 @@ install_wizard() {
     printf "  ${G2}╔══${BOLD} INSTALLATION WIZARD ${G2}$(printf '%*s' $((TERM_WIDTH - 28)) '' | tr ' ' '═')╗${RST}\n"
     echo ""
 
-    # Step 1: Role
     printf "  ${G2}${BOLD}Step 1:${RST} ${GR1}Select this server role${RST}\n\n"
     print_menu "1" "IRAN Server  (Entry Point - users connect here)"
     print_menu "2" "KHAREJ Server (Exit Point - V2Ray panel here)"
@@ -862,7 +865,6 @@ install_wizard() {
 
     echo ""; print_line
 
-    # Step 2: IPs
     printf "\n  ${G2}${BOLD}Step 2:${RST} ${GR1}Server IP Addresses${RST}\n\n"
     local my_ip
     my_ip=$(get_public_ip)
@@ -881,7 +883,6 @@ install_wizard() {
 
     echo ""; print_line
 
-    # Step 3: Hysteria2
     printf "\n  ${G2}${BOLD}Step 3:${RST} ${GR1}Hysteria2 Settings${RST}\n\n"
     local def_pass def_obfs
     def_pass=$(gen_pass 20)
@@ -892,7 +893,6 @@ install_wizard() {
 
     echo ""; print_line
 
-    # Step 4: V2Ray ports
     printf "\n  ${G2}${BOLD}Step 4:${RST} ${GR1}V2Ray Panel Ports${RST}\n\n"
     msg_info "Enter ports used by your V2Ray panel (comma-separated)"
     msg_info "Example: 443,80,8443,2053,2083,2087,2096,54321"
@@ -903,12 +903,13 @@ install_wizard() {
 
     echo ""; print_line
 
-    # Summary
     printf "\n  ${G2}${BOLD}Summary:${RST}\n\n"
     printf "  ${GR4}┌─────────────────────────────────────────────────┐${RST}\n"
     printf "  ${GR4}│${RST}  ${GR3}Role:${RST}          ${G1}%-34s${RST}${GR4}│${RST}\n" "$([ "$SERVER_ROLE" = "iran" ] && echo "IRAN (Entry)" || echo "KHAREJ (Exit)")"
     printf "  ${GR4}│${RST}  ${GR3}Iran IP:${RST}       ${GR1}%-34s${RST}${GR4}│${RST}\n" "$IRAN_IP"
     printf "  ${GR4}│${RST}  ${GR3}Kharej IP:${RST}     ${GR1}%-34s${RST}${GR4}│${RST}\n" "$KHAREJ_IP"
+    printf "  ${GR4}│${RST}  ${GR3}GRE Iran:${RST}      ${GR1}%-34s${RST}${GR4}│${RST}\n" "$GRE_IRAN"
+    printf "  ${GR4}│${RST}  ${GR3}GRE Kharej:${RST}    ${GR1}%-34s${RST}${GR4}│${RST}\n" "$GRE_KHAREJ"
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Port:${RST}      ${GR1}%-34s${RST}${GR4}│${RST}\n" "$HYSTERIA_PORT"
     printf "  ${GR4}│${RST}  ${GR3}V2Ray Ports:${RST}   ${GR1}%-34s${RST}${GR4}│${RST}\n" "$V2RAY_PORTS"
     printf "  ${GR4}│${RST}  ${GR3}Interface:${RST}     ${GR1}%-34s${RST}${GR4}│${RST}\n" "$NET_IFACE"
@@ -926,19 +927,16 @@ install_wizard() {
     [[ "$SERVER_ROLE" == "iran" ]] && steps=7 || steps=6
     local s=1
 
-    # Kernel
     progress_bar $s $steps "Kernel"
     echo ""
     apply_kernel
     (( s++ ))
 
-    # Prereqs
     progress_bar $s $steps "Packages"
     echo ""
     install_prereqs "$SERVER_ROLE"
     (( s++ ))
 
-    # GRE
     progress_bar $s $steps "GRE Tunnel"
     echo ""
     if [[ "$SERVER_ROLE" == "iran" ]]; then
@@ -948,7 +946,6 @@ install_wizard() {
     fi
     (( s++ ))
 
-    # Hysteria2
     progress_bar $s $steps "Hysteria2"
     echo ""
     if [[ "$SERVER_ROLE" == "iran" ]]; then
@@ -958,7 +955,6 @@ install_wizard() {
     fi
     (( s++ ))
 
-    # HAProxy (Iran only)
     if [[ "$SERVER_ROLE" == "iran" ]]; then
         progress_bar $s $steps "HAProxy"
         echo ""
@@ -966,7 +962,6 @@ install_wizard() {
         (( s++ ))
     fi
 
-    # iptables
     progress_bar $s $steps "iptables"
     echo ""
     if [[ "$SERVER_ROLE" == "iran" ]]; then
@@ -976,7 +971,6 @@ install_wizard() {
     fi
     (( s++ ))
 
-    # Watchdog
     progress_bar $s $steps "Watchdog"
     echo ""
     setup_watchdog
@@ -1018,7 +1012,7 @@ show_status() {
     echo ""
 
     local peer_ip
-    [[ "$SERVER_ROLE" == "iran" ]] && peer_ip="10.0.0.2" || peer_ip="10.0.0.1"
+    [[ "$SERVER_ROLE" == "iran" ]] && peer_ip="$GRE_KHAREJ" || peer_ip="$GRE_IRAN"
 
     local gre_s="DOWN"
     if ip link show gre1 &>/dev/null; then
@@ -1044,7 +1038,6 @@ show_status() {
     crontab -l 2>/dev/null | grep -q "vira-watchdog" && wd_s="ACTIVE"
     print_stat "Watchdog" "$wd_s" "🐕"
 
-    # HAProxy Backend Chart
     if [[ "$SERVER_ROLE" == "iran" ]] && [[ -S /run/haproxy/admin.sock ]]; then
         echo ""
         printf "  ${G3}├── ${G2}${BOLD}HAProxy Backends${RST}\n"
@@ -1056,7 +1049,6 @@ show_status() {
         done
     fi
 
-    # Resource Charts
     echo ""
     printf "  ${G3}├── ${G2}${BOLD}System Resources${RST}\n"
 
@@ -1082,7 +1074,6 @@ show_status() {
         draw_bar "$ct_c" "$ct_m" 25 "Conntrack"
     fi
 
-    # Network Stats
     echo ""
     printf "  ${G3}├── ${G2}${BOLD}Network Traffic${RST}\n"
 
@@ -1118,11 +1109,11 @@ test_ping() {
     local targets=() labels=()
     if is_installed; then
         if [[ "$SERVER_ROLE" == "iran" ]]; then
-            targets+=("10.0.0.2" "$KHAREJ_IP" "8.8.8.8" "1.1.1.1")
-            labels+=("GRE Tunnel (10.0.0.2)" "Kharej (Direct)" "Google DNS" "Cloudflare DNS")
+            targets+=("$GRE_KHAREJ" "$KHAREJ_IP" "8.8.8.8" "1.1.1.1")
+            labels+=("GRE Tunnel ($GRE_KHAREJ)" "Kharej (Direct)" "Google DNS" "Cloudflare DNS")
         else
-            targets+=("10.0.0.1" "$IRAN_IP" "8.8.8.8" "1.1.1.1")
-            labels+=("GRE Tunnel (10.0.0.1)" "Iran (Direct)" "Google DNS" "Cloudflare DNS")
+            targets+=("$GRE_IRAN" "$IRAN_IP" "8.8.8.8" "1.1.1.1")
+            labels+=("GRE Tunnel ($GRE_IRAN)" "Iran (Direct)" "Google DNS" "Cloudflare DNS")
         fi
     else
         targets+=("8.8.8.8" "1.1.1.1" "4.2.2.4")
@@ -1232,7 +1223,7 @@ test_speed() {
             echo ""
             if ! is_installed; then msg_warn "Install tunnel first"; press_key; return; fi
             local pr_ip
-            [[ "$SERVER_ROLE" == "iran" ]] && pr_ip="10.0.0.2" || pr_ip="10.0.0.1"
+            [[ "$SERVER_ROLE" == "iran" ]] && pr_ip="$GRE_KHAREJ" || pr_ip="$GRE_IRAN"
             msg_info "GRE tunnel speed test to $pr_ip"
             msg_info "Run 'iperf3 -s' on the other server first"
             echo ""
@@ -1281,7 +1272,7 @@ live_monitor() {
     if ! is_installed; then msg_warn "Install tunnel first"; press_key; return; fi
 
     local peer_ip
-    [[ "$SERVER_ROLE" == "iran" ]] && peer_ip="10.0.0.2" || peer_ip="10.0.0.1"
+    [[ "$SERVER_ROLE" == "iran" ]] && peer_ip="$GRE_KHAREJ" || peer_ip="$GRE_IRAN"
 
     cat > /tmp/vira_mon.sh << 'MEOF'
 #!/bin/bash
@@ -1371,7 +1362,7 @@ troubleshoot() {
 
     local issues=0
     local peer_ip
-    [[ "$SERVER_ROLE" == "iran" ]] && peer_ip="10.0.0.2" || peer_ip="10.0.0.1"
+    [[ "$SERVER_ROLE" == "iran" ]] && peer_ip="$GRE_KHAREJ" || peer_ip="$GRE_IRAN"
 
     printf "  ${G2}[1/8]${RST} ${GR2}GRE Interface...${RST}\n"
     if ip link show gre1 &>/dev/null; then
@@ -1593,7 +1584,7 @@ manage_services() {
             ;;
         7)
             msg_info "Starting iperf3 server on port 5201..."
-            msg_info "From other server run: iperf3 -c 10.0.0.x -t 10"
+            msg_info "From other server run: iperf3 -c ${GRE_IRAN} -t 10  (or ${GRE_KHAREJ})"
             msg_info "Ctrl+C to stop"; echo ""
             iperf3 -s
             ;;
@@ -1615,7 +1606,8 @@ show_config() {
     printf "  ${GR4}│${RST}  ${GR3}Role:${RST}           ${G1}${BOLD}%-32s${RST}${GR4}│${RST}\n" "$([ "$SERVER_ROLE" = "iran" ] && echo "IRAN (Entry)" || echo "KHAREJ (Exit)")"
     printf "  ${GR4}│${RST}  ${GR3}Iran IP:${RST}        ${GR1}%-32s${RST}${GR4}│${RST}\n" "$IRAN_IP"
     printf "  ${GR4}│${RST}  ${GR3}Kharej IP:${RST}      ${GR1}%-32s${RST}${GR4}│${RST}\n" "$KHAREJ_IP"
-    printf "  ${GR4}│${RST}  ${GR3}GRE IPs:${RST}        ${GR1}%-32s${RST}${GR4}│${RST}\n" "10.0.0.1 <-> 10.0.0.2"
+    printf "  ${GR4}│${RST}  ${GR3}GRE Iran:${RST}       ${GR1}%-32s${RST}${GR4}│${RST}\n" "$GRE_IRAN"
+    printf "  ${GR4}│${RST}  ${GR3}GRE Kharej:${RST}     ${GR1}%-32s${RST}${GR4}│${RST}\n" "$GRE_KHAREJ"
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Port:${RST}       ${GR1}%-32s${RST}${GR4}│${RST}\n" "$HYSTERIA_PORT"
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Password:${RST}   ${G5}%-32s${RST}${GR4}│${RST}\n" "$HYSTERIA_PASSWORD"
     printf "  ${GR4}│${RST}  ${GR3}Obfs Password:${RST}  ${G5}%-32s${RST}${GR4}│${RST}\n" "$OBFS_PASSWORD"
