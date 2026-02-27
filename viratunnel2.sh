@@ -279,7 +279,7 @@ HYSTERIA_PORT=${HYSTERIA_PORT}
 HYSTERIA_PASSWORD=${HYSTERIA_PASSWORD}
 OBFS_PASSWORD=${OBFS_PASSWORD}
 NET_IFACE=${NET_IFACE}
-V2RAY_PORTS=${V2RAY_PORTS}
+CONFIG_PORTS=${CONFIG_PORTS}
 CFEOF
     chmod 600 "$CONFIG_FILE"
 }
@@ -897,7 +897,7 @@ install_wizard() {
     msg_info "Enter ports used by your V2Ray panel (comma-separated)"
     msg_info "Example: 443,80,8443,2053,2083,2087,2096,54321"
     echo ""
-    ask "V2Ray ports" V2RAY_PORTS "443,80,8443,2053,2083,2087,2096,54321"
+    ask "V2Ray ports" CONFIG_PORTS "443,80,8443,2053,2083,2087,2096,54321"
 
     NET_IFACE=$(detect_interface)
 
@@ -911,7 +911,7 @@ install_wizard() {
     printf "  ${GR4}│${RST}  ${GR3}GRE Iran:${RST}      ${GR1}%-34s${RST}${GR4}│${RST}\n" "$GRE_IRAN"
     printf "  ${GR4}│${RST}  ${GR3}GRE Kharej:${RST}    ${GR1}%-34s${RST}${GR4}│${RST}\n" "$GRE_KHAREJ"
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Port:${RST}      ${GR1}%-34s${RST}${GR4}│${RST}\n" "$HYSTERIA_PORT"
-    printf "  ${GR4}│${RST}  ${GR3}V2Ray Ports:${RST}   ${GR1}%-34s${RST}${GR4}│${RST}\n" "$V2RAY_PORTS"
+    printf "  ${GR4}│${RST}  ${GR3}V2Ray Ports:${RST}   ${GR1}%-34s${RST}${GR4}│${RST}\n" "$CONFIG_PORTS"
     printf "  ${GR4}│${RST}  ${GR3}Interface:${RST}     ${GR1}%-34s${RST}${GR4}│${RST}\n" "$NET_IFACE"
     printf "  ${GR4}└─────────────────────────────────────────────────┘${RST}\n"
     echo ""
@@ -949,7 +949,7 @@ install_wizard() {
     progress_bar $s $steps "Hysteria2"
     echo ""
     if [[ "$SERVER_ROLE" == "iran" ]]; then
-        setup_hy2_client "$KHAREJ_IP" "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD" "$OBFS_PASSWORD" "$V2RAY_PORTS"
+        setup_hy2_client "$KHAREJ_IP" "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD" "$OBFS_PASSWORD" "$CONFIG_PORTS"
     else
         setup_hy2_server "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD" "$OBFS_PASSWORD"
     fi
@@ -958,16 +958,16 @@ install_wizard() {
     if [[ "$SERVER_ROLE" == "iran" ]]; then
         progress_bar $s $steps "HAProxy"
         echo ""
-        setup_haproxy "$V2RAY_PORTS"
+        setup_haproxy "$CONFIG_PORTS"
         (( s++ ))
     fi
 
     progress_bar $s $steps "iptables"
     echo ""
     if [[ "$SERVER_ROLE" == "iran" ]]; then
-        setup_ipt_iran "$KHAREJ_IP" "$HYSTERIA_PORT" "$V2RAY_PORTS" "$NET_IFACE"
+        setup_ipt_iran "$KHAREJ_IP" "$HYSTERIA_PORT" "$CONFIG_PORTS" "$NET_IFACE"
     else
-        setup_ipt_kharej "$IRAN_IP" "$HYSTERIA_PORT" "$V2RAY_PORTS" "$NET_IFACE"
+        setup_ipt_kharej "$IRAN_IP" "$HYSTERIA_PORT" "$CONFIG_PORTS" "$NET_IFACE"
     fi
     (( s++ ))
 
@@ -1410,7 +1410,7 @@ troubleshoot() {
     printf "  ${G2}[5/8]${RST} ${GR2}Port Forwarding...${RST}\n"
     if [[ "$SERVER_ROLE" == "iran" ]]; then
         local pok=0 pfail=0
-        local IFS_B="$IFS"; IFS=',' read -ra PTS <<< "$V2RAY_PORTS"; IFS="$IFS_B"
+        local IFS_B="$IFS"; IFS=',' read -ra PTS <<< "$CONFIG_PORTS"; IFS="$IFS_B"
         for p in "${PTS[@]}"; do
             p=$(echo "$p" | tr -d ' ')
             if ss -tlnp 2>/dev/null | grep -q ":${p} "; then
@@ -1611,7 +1611,7 @@ show_config() {
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Port:${RST}       ${GR1}%-32s${RST}${GR4}│${RST}\n" "$HYSTERIA_PORT"
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Password:${RST}   ${G5}%-32s${RST}${GR4}│${RST}\n" "$HYSTERIA_PASSWORD"
     printf "  ${GR4}│${RST}  ${GR3}Obfs Password:${RST}  ${G5}%-32s${RST}${GR4}│${RST}\n" "$OBFS_PASSWORD"
-    printf "  ${GR4}│${RST}  ${GR3}V2Ray Ports:${RST}    ${GR1}%-32s${RST}${GR4}│${RST}\n" "$V2RAY_PORTS"
+    printf "  ${GR4}│${RST}  ${GR3}V2Ray Ports:${RST}    ${GR1}%-32s${RST}${GR4}│${RST}\n" "$CONFIG_PORTS"
     printf "  ${GR4}│${RST}  ${GR3}Interface:${RST}      ${GR1}%-32s${RST}${GR4}│${RST}\n" "$NET_IFACE"
     printf "  ${GR4}└──────────────────────────────────────────────────┘${RST}\n"
 
@@ -1633,19 +1633,19 @@ edit_ports() {
     if ! is_installed; then msg_warn "Not installed"; press_key; return; fi
     if [[ "$SERVER_ROLE" != "iran" ]]; then msg_warn "Port editing only on Iran server"; press_key; return; fi
 
-    printf "\n  ${GR3}Current ports:${RST} ${G1}${V2RAY_PORTS}${RST}\n\n"
-    ask "New ports (comma-separated)" NP "$V2RAY_PORTS"
+    printf "\n  ${GR3}Current ports:${RST} ${G1}${CONFIG_PORTS}${RST}\n\n"
+    ask "New ports (comma-separated)" NP "$CONFIG_PORTS"
 
-    if [[ "$NP" == "$V2RAY_PORTS" ]]; then msg_info "No changes"; press_key; return; fi
+    if [[ "$NP" == "$CONFIG_PORTS" ]]; then msg_info "No changes"; press_key; return; fi
 
-    V2RAY_PORTS="$NP"
+    CONFIG_PORTS="$NP"
     save_config
 
     echo ""
     msg_info "Rebuilding configuration..."
-    setup_hy2_client "$KHAREJ_IP" "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD" "$OBFS_PASSWORD" "$V2RAY_PORTS"
-    setup_haproxy "$V2RAY_PORTS"
-    setup_ipt_iran "$KHAREJ_IP" "$HYSTERIA_PORT" "$V2RAY_PORTS" "$NET_IFACE"
+    setup_hy2_client "$KHAREJ_IP" "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD" "$OBFS_PASSWORD" "$CONFIG_PORTS"
+    setup_haproxy "$CONFIG_PORTS"
+    setup_ipt_iran "$KHAREJ_IP" "$HYSTERIA_PORT" "$CONFIG_PORTS" "$NET_IFACE"
     echo ""
     msg_ok "Ports updated successfully"
     press_key
@@ -1733,9 +1733,9 @@ advanced_menu() {
                 if is_installed; then
                     msg_info "Reapplying iptables..."
                     if [[ "$SERVER_ROLE" == "iran" ]]; then
-                        setup_ipt_iran "$KHAREJ_IP" "$HYSTERIA_PORT" "$V2RAY_PORTS" "$NET_IFACE"
+                        setup_ipt_iran "$KHAREJ_IP" "$HYSTERIA_PORT" "$CONFIG_PORTS" "$NET_IFACE"
                     else
-                        setup_ipt_kharej "$IRAN_IP" "$HYSTERIA_PORT" "$V2RAY_PORTS" "$NET_IFACE"
+                        setup_ipt_kharej "$IRAN_IP" "$HYSTERIA_PORT" "$CONFIG_PORTS" "$NET_IFACE"
                     fi
                 else
                     msg_warn "Not installed"
@@ -1885,6 +1885,3 @@ main() {
 }
 
 main "$@"
-
-
-
