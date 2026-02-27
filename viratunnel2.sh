@@ -1,8 +1,7 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════
-#  VIRA TUNNEL v2.2 — Hybrid Tunnel Manager (FIXED)
+#  VIRA TUNNEL v2 — Hybrid Tunnel Manager
 #  iptables + HAProxy + GRE + Hysteria2
-#  Fixed: Port overflow, connection timeout, setup order
 # ═══════════════════════════════════════════════════════════════════
 
 VERSION="2.2"
@@ -2247,3 +2246,4 @@ main() {
 }
 
 main "$@"
+
