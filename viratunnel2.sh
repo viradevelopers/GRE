@@ -2,7 +2,6 @@
 # ═══════════════════════════════════════════════════════════════════
 #  VIRA TUNNEL v2 — Hybrid Tunnel Manager
 #  iptables + HAProxy + GRE + Hysteria2
-#  Designed for Ubuntu 22.04
 # ═══════════════════════════════════════════════════════════════════
 
 VERSION="2"
@@ -266,7 +265,9 @@ get_link_speed() {
     echo "N/A"
 }
 
-load_config() { [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"; }
+load_config() { 
+    [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+}
 
 save_config() {
     mkdir -p "$CONFIG_DIR"
@@ -432,7 +433,7 @@ install_prereqs() {
     spinner $! "Updating package lists..."
     msg_ok "Package lists updated"
 
-    local pkgs="curl wget net-tools openssl iproute2 jq iptables-persistent socat mtr-tiny iperf3 bc ethtool"
+    local pkgs="curl wget net-tools openssl iproute2 jq iptables-persistent socat mtr-tiny iperf3 bc ethtool iputils-ping"
     [[ "$role" == "iran" ]] && pkgs+=" haproxy"
 
     apt-get install -y -qq $pkgs > /dev/null 2>&1 &
@@ -459,7 +460,10 @@ setup_gre() {
         gre_remote="$GRE_IRAN"
     fi
 
+    # Clean up existing tunnel
+    ip link set gre1 down 2>/dev/null || true
     ip tunnel del gre1 2>/dev/null || true
+    sleep 2
 
     cat > /etc/systemd/system/vira-gre.service << EOF
 [Unit]
@@ -470,10 +474,14 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+ExecStartPre=/bin/sleep 3
+ExecStartPre=-/sbin/ip tunnel del gre1
 ExecStart=/sbin/ip tunnel add gre1 mode gre remote ${remote_pub} local ${local_pub} ttl 255
 ExecStart=/sbin/ip addr add ${gre_local}/30 dev gre1
-ExecStart=/sbin/ip link set gre1 up
 ExecStart=/sbin/ip link set gre1 mtu 1400
+ExecStart=/sbin/ip link set gre1 up
+ExecStartPost=/bin/sleep 2
+ExecStop=/sbin/ip link set gre1 down
 ExecStop=/sbin/ip tunnel del gre1
 
 [Install]
@@ -483,35 +491,61 @@ EOF
     systemctl daemon-reload
     systemctl enable vira-gre.service > /dev/null 2>&1
     systemctl restart vira-gre.service 2>/dev/null
-    sleep 2
+    sleep 5
 
-    if ip link show gre1 &>/dev/null; then
-        msg_ok "GRE tunnel UP (${gre_local} <-> ${gre_remote})"
-    else
-        msg_err "GRE tunnel creation FAILED"
-        return 1
-    fi
-    log_msg "INFO" "GRE tunnel: ${gre_local} <-> ${gre_remote}"
+    # Validation with retry
+    local retry=0
+    while (( retry < 5 )); do
+        if ip link show gre1 &>/dev/null; then
+            if ip addr show gre1 2>/dev/null | grep -q "$gre_local"; then
+                msg_ok "GRE tunnel UP (${gre_local} <-> ${gre_remote})"
+                log_msg "INFO" "GRE tunnel: ${gre_local} <-> ${gre_remote}"
+                return 0
+            fi
+        fi
+        (( retry++ ))
+        sleep 2
+    done
+    
+    msg_err "GRE tunnel creation FAILED after 5 retries"
+    journalctl -u vira-gre --no-pager -n 10
+    return 1
 }
 
 # ─── Hysteria2 Server (Kharej) ────────────────
 setup_hy2_server() {
     local port="$1" pass="$2" obfs="$3"
 
+    # Install Hysteria2
     bash <(curl -fsSL https://get.hy2.sh/) > /dev/null 2>&1 &
     spinner $! "Installing Hysteria2..."
+    
+    # Check installation
+    if ! command -v hysteria &>/dev/null && [[ ! -f /usr/local/bin/hysteria ]]; then
+        msg_err "Hysteria2 installation failed"
+        return 1
+    fi
     msg_ok "Hysteria2 binary installed"
 
     mkdir -p "$HYSTERIA_DIR"
+    
+    # Generate self-signed certificate
     openssl req -x509 -nodes \
         -newkey ec:<(openssl ecparam -name prime256v1) \
         -keyout "${HYSTERIA_DIR}/server.key" \
         -out "${HYSTERIA_DIR}/server.crt" \
-        -subj "/CN=www.microsoft.com" -days 36500 2>/dev/null
+        -subj "/CN=www.bing.com" -days 36500 2>/dev/null
+    
+    if [[ ! -f "${HYSTERIA_DIR}/server.crt" ]] || [[ ! -f "${HYSTERIA_DIR}/server.key" ]]; then
+        msg_err "Certificate generation failed"
+        return 1
+    fi
+    
     chmod 644 "${HYSTERIA_DIR}/server.crt"
     chmod 600 "${HYSTERIA_DIR}/server.key"
     msg_ok "TLS certificate generated"
 
+    # Create server config
     cat > "${HYSTERIA_DIR}/config.yaml" << EOF
 listen: :${port}
 
@@ -522,32 +556,40 @@ tls:
 obfs:
   type: salamander
   salamander:
-    password: "${obfs}"
+    password: ${obfs}
 
 auth:
   type: password
-  password: "${pass}"
+  password: ${pass}
 
 quic:
   initStreamReceiveWindow: 8388608
   maxStreamReceiveWindow: 8388608
   initConnReceiveWindow: 20971520
   maxConnReceiveWindow: 20971520
+  maxIdleTimeout: 90s
+  maxIncomingStreams: 2048
+  disablePathMTUDiscovery: false
 
 bandwidth:
   up: 1 gbps
   down: 1 gbps
+
+ignoreClientBandwidth: false
+
+disableUDP: false
+
+udpIdleTimeout: 90s
 
 masquerade:
   type: proxy
   proxy:
     url: https://www.bing.com
     rewriteHost: true
-
-disablePathMTUDiscovery: false
 EOF
 
-    cat > /etc/systemd/system/vira-hysteria.service << 'EOF'
+    # Create systemd service
+    cat > /etc/systemd/system/vira-hysteria.service << EOF
 [Unit]
 Description=VIRA Hysteria2 Server
 After=network-online.target
@@ -555,10 +597,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/hysteria server -c /etc/hysteria/config.yaml
+User=root
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/local/bin/hysteria server -c ${HYSTERIA_DIR}/config.yaml
 Restart=always
-RestartSec=3
+RestartSec=5
 LimitNOFILE=1048576
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -566,40 +612,78 @@ EOF
 
     systemctl daemon-reload
     systemctl enable vira-hysteria.service > /dev/null 2>&1
-    systemctl restart vira-hysteria.service
+    systemctl stop vira-hysteria.service 2>/dev/null
     sleep 2
+    systemctl start vira-hysteria.service
+    sleep 6
 
-    if systemctl is-active --quiet vira-hysteria.service; then
-        msg_ok "Hysteria2 Server RUNNING (port ${port}/UDP)"
-    else
-        msg_err "Hysteria2 Server FAILED to start"
-        journalctl -u vira-hysteria --no-pager -n 5
-        return 1
-    fi
-    log_msg "INFO" "Hysteria2 server on port ${port}"
+    # Validation
+    local retry=0
+    while (( retry < 5 )); do
+        if systemctl is-active --quiet vira-hysteria.service; then
+            if ss -ulnp 2>/dev/null | grep -q ":${port} "; then
+                msg_ok "Hysteria2 Server RUNNING (port ${port}/UDP)"
+                log_msg "INFO" "Hysteria2 server on port ${port}"
+                return 0
+            fi
+        fi
+        (( retry++ ))
+        sleep 3
+    done
+
+    msg_err "Hysteria2 Server FAILED to start"
+    journalctl -u vira-hysteria --no-pager -n 20
+    return 1
 }
 
 # ─── Hysteria2 Client (Iran) ──────────────────
 setup_hy2_client() {
     local kharej_ip="$1" port="$2" pass="$3" obfs="$4" ports_csv="$5"
 
+    # Install Hysteria2
     bash <(curl -fsSL https://get.hy2.sh/) > /dev/null 2>&1 &
     spinner $! "Installing Hysteria2..."
+    
+    if ! command -v hysteria &>/dev/null && [[ ! -f /usr/local/bin/hysteria ]]; then
+        msg_err "Hysteria2 installation failed"
+        return 1
+    fi
     msg_ok "Hysteria2 binary installed"
 
     mkdir -p "$HYSTERIA_DIR"
 
+    # Parse ports
+    local IFS_BAK="$IFS"
+    IFS=',' read -ra PLIST <<< "$ports_csv"
+    IFS="$IFS_BAK"
+
+    # Build forwarding config
+    local tcp_rules="" udp_rules=""
+    for p in "${PLIST[@]}"; do
+        p=$(echo "$p" | tr -d ' ')
+        local lp=$(( 20000 + p ))
+        tcp_rules+="  - listen: 127.0.0.1:${lp}
+    remote: 127.0.0.1:${p}
+"
+        udp_rules+="  - listen: 127.0.0.1:${lp}
+    remote: 127.0.0.1:${p}
+    timeout: 120s
+"
+    done
+
+    # Create client config
     cat > "${HYSTERIA_DIR}/config.yaml" << EOF
 server: ${kharej_ip}:${port}
 
-auth: "${pass}"
+auth: ${pass}
 
 obfs:
   type: salamander
   salamander:
-    password: "${obfs}"
+    password: ${obfs}
 
 tls:
+  sni: www.bing.com
   insecure: true
 
 quic:
@@ -607,47 +691,42 @@ quic:
   maxStreamReceiveWindow: 8388608
   initConnReceiveWindow: 20971520
   maxConnReceiveWindow: 20971520
+  maxIdleTimeout: 90s
+  keepAlivePeriod: 20s
+  disablePathMTUDiscovery: false
 
 bandwidth:
-  up: 200 mbps
-  down: 200 mbps
+  up: 100 mbps
+  down: 100 mbps
 
 fastOpen: true
 
+lazy: false
+
+tcpForwarding:
+${tcp_rules}
+udpForwarding:
+${udp_rules}
 EOF
 
-    echo "tcpForwarding:" >> "${HYSTERIA_DIR}/config.yaml"
-    local IFS_BAK="$IFS"
-    IFS=',' read -ra PLIST <<< "$ports_csv"
-    IFS="$IFS_BAK"
-    for p in "${PLIST[@]}"; do
-        p=$(echo "$p" | tr -d ' ')
-        local lp=$(( 20000 + p ))
-        echo "  - listen: 127.0.0.1:${lp}" >> "${HYSTERIA_DIR}/config.yaml"
-        echo "    remote: 127.0.0.1:${p}" >> "${HYSTERIA_DIR}/config.yaml"
-    done
-
-    echo "" >> "${HYSTERIA_DIR}/config.yaml"
-    echo "udpForwarding:" >> "${HYSTERIA_DIR}/config.yaml"
-    for p in "${PLIST[@]}"; do
-        p=$(echo "$p" | tr -d ' ')
-        local lp=$(( 20000 + p ))
-        echo "  - listen: 127.0.0.1:${lp}" >> "${HYSTERIA_DIR}/config.yaml"
-        echo "    remote: 127.0.0.1:${p}" >> "${HYSTERIA_DIR}/config.yaml"
-    done
-
-    cat > /etc/systemd/system/vira-hysteria.service << 'EOF'
+    # Create systemd service with GRE dependency
+    cat > /etc/systemd/system/vira-hysteria.service << EOF
 [Unit]
 Description=VIRA Hysteria2 Client
 After=network-online.target vira-gre.service
 Wants=network-online.target
+Requires=vira-gre.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/hysteria client -c /etc/hysteria/config.yaml
+User=root
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/local/bin/hysteria client -c ${HYSTERIA_DIR}/config.yaml
 Restart=always
-RestartSec=3
+RestartSec=10
 LimitNOFILE=1048576
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -655,24 +734,55 @@ EOF
 
     systemctl daemon-reload
     systemctl enable vira-hysteria.service > /dev/null 2>&1
-    systemctl restart vira-hysteria.service
-    sleep 3
+    systemctl stop vira-hysteria.service 2>/dev/null
+    sleep 2
+    systemctl start vira-hysteria.service
+    sleep 10
 
-    if systemctl is-active --quiet vira-hysteria.service; then
-        msg_ok "Hysteria2 Client RUNNING"
-    else
-        msg_err "Hysteria2 Client FAILED to start"
-        journalctl -u vira-hysteria --no-pager -n 5
-        return 1
-    fi
-    log_msg "INFO" "Hysteria2 client configured"
+    # Validation with retry
+    local retry=0
+    while (( retry < 8 )); do
+        if systemctl is-active --quiet vira-hysteria.service; then
+            local ports_ok=0
+            for p in "${PLIST[@]}"; do
+                p=$(echo "$p" | tr -d ' ')
+                local lp=$(( 20000 + p ))
+                if ss -tlnp 2>/dev/null | grep -q "127.0.0.1:${lp}"; then
+                    (( ports_ok++ ))
+                fi
+            done
+            
+            if (( ports_ok > 0 )); then
+                msg_ok "Hysteria2 Client RUNNING (${ports_ok}/${#PLIST[@]} ports listening)"
+                log_msg "INFO" "Hysteria2 client configured with ${ports_ok} ports"
+                return 0
+            fi
+        fi
+        (( retry++ ))
+        sleep 3
+    done
+
+    msg_err "Hysteria2 Client FAILED to start or bind ports"
+    msg_info "Checking service status..."
+    systemctl status vira-hysteria --no-pager -n 5 2>&1 | while IFS= read -r line; do
+        printf "  ${GR4}%s${RST}\n" "$line"
+    done
+    echo ""
+    msg_info "Checking logs..."
+    journalctl -u vira-hysteria --no-pager -n 15 2>&1 | while IFS= read -r line; do
+        printf "  ${GR4}%s${RST}\n" "$line"
+    done
+    return 1
 }
 
 # ─── HAProxy (Iran) ───────────────────────────
 setup_haproxy() {
     local ports_csv="$1"
+    
+    # Backup existing config
     cp /etc/haproxy/haproxy.cfg "/etc/haproxy/haproxy.cfg.bak.$(date +%s)" 2>/dev/null || true
 
+    # Write HAProxy config
     cat > /etc/haproxy/haproxy.cfg << 'HAHDR'
 # VIRA TUNNEL - HAProxy Config (auto-generated)
 global
@@ -695,7 +805,7 @@ defaults
     option  dontlognull
     option  tcp-smart-accept
     option  tcp-smart-connect
-    timeout connect 10s
+    timeout connect 15s
     timeout client  300s
     timeout server  300s
     timeout tunnel  3600s
@@ -717,6 +827,7 @@ HAHDR
     local IFS_BAK="$IFS"
     IFS=',' read -ra PLIST <<< "$ports_csv"
     IFS="$IFS_BAK"
+    
     for p in "${PLIST[@]}"; do
         p=$(echo "$p" | tr -d ' ')
         local lp=$(( 20000 + p ))
@@ -731,114 +842,269 @@ frontend ft_${p}
 
 backend bk_${p}
     mode tcp
-    balance first
+    balance roundrobin
     option tcp-check
-    server hy2-${p} 127.0.0.1:${lp} check inter 3s fall 3 rise 2 weight 100
-    server gre-${p} ${GRE_KHAREJ}:${p} check inter 3s fall 3 rise 2 weight 50 backup
+    server hy2_${p} 127.0.0.1:${lp} check inter 5s fall 3 rise 2 weight 100
+    server gre_${p} ${GRE_KHAREJ}:${p} check inter 5s fall 3 rise 2 weight 50 backup
+
 EOF
     done
 
-    if haproxy -c -f /etc/haproxy/haproxy.cfg > /dev/null 2>&1; then
-        systemctl restart haproxy
-        systemctl enable haproxy > /dev/null 2>&1
-        sleep 1
-        if systemctl is-active --quiet haproxy; then
-            msg_ok "HAProxy RUNNING (${#PLIST[@]} ports configured)"
-        else
-            msg_err "HAProxy failed to start"
-            return 1
-        fi
-    else
+    # Validate config
+    if ! haproxy -c -f /etc/haproxy/haproxy.cfg > /dev/null 2>&1; then
         msg_err "HAProxy config validation FAILED"
-        haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | head -5
+        haproxy -c -f /etc/haproxy/haproxy.cfg 2>&1 | head -10
         return 1
     fi
-    log_msg "INFO" "HAProxy configured: ${ports_csv}"
+
+    systemctl restart haproxy
+    systemctl enable haproxy > /dev/null 2>&1
+    sleep 3
+
+    if systemctl is-active --quiet haproxy; then
+        msg_ok "HAProxy RUNNING (${#PLIST[@]} ports configured)"
+        log_msg "INFO" "HAProxy configured: ${ports_csv}"
+        return 0
+    else
+        msg_err "HAProxy failed to start"
+        journalctl -u haproxy --no-pager -n 10
+        return 1
+    fi
 }
 
 # ─── iptables Iran ─────────────────────────────
 setup_ipt_iran() {
     local kharej_ip="$1" hy_port="$2" ports_csv="$3" iface="$4"
 
-    iptables -F; iptables -t nat -F; iptables -t mangle -F
-    iptables -P INPUT ACCEPT; iptables -P FORWARD ACCEPT; iptables -P OUTPUT ACCEPT
+    # Flush all rules
+    iptables -F
+    iptables -t nat -F
+    iptables -t mangle -F
+    iptables -X 2>/dev/null
+    iptables -t nat -X 2>/dev/null
+    iptables -t mangle -X 2>/dev/null
 
+    # Set default policies
+    iptables -P INPUT ACCEPT
+    iptables -P FORWARD ACCEPT
+    iptables -P OUTPUT ACCEPT
+
+    # Allow established connections
     iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+    # Allow loopback
+    iptables -A INPUT -i lo -j ACCEPT
+    iptables -A OUTPUT -o lo -j ACCEPT
+
+    # SSH
     iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+
+    # GRE tunnel
     iptables -A INPUT -p gre -s "${kharej_ip}" -j ACCEPT
     iptables -A OUTPUT -p gre -d "${kharej_ip}" -j ACCEPT
+
+    # Hysteria2 UDP
     iptables -A OUTPUT -p udp --dport "${hy_port}" -d "${kharej_ip}" -j ACCEPT
-    iptables -A FORWARD -i gre1 -j ACCEPT
-    iptables -A FORWARD -o gre1 -j ACCEPT
-    iptables -t nat -A POSTROUTING -s ${GRE_SUBNET} -j MASQUERADE
+    iptables -A INPUT -p udp --sport "${hy_port}" -s "${kharej_ip}" -j ACCEPT
+
+    # GRE forwarding
+    iptables -A FORWARD -i gre1 -o "${iface}" -j ACCEPT
+    iptables -A FORWARD -i "${iface}" -o gre1 -j ACCEPT
+    iptables -A FORWARD -i gre1 -o gre1 -j ACCEPT
+
+    # NAT for GRE
+    iptables -t nat -A POSTROUTING -s ${GRE_SUBNET} -o "${iface}" -j MASQUERADE
+
+    # MSS clamping
     iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360
+    iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o gre1 -j TCPMSS --set-mss 1360
+
+    # Drop invalid packets
     iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
     iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP
-    iptables -A INPUT -p tcp --syn -m limit --limit 200/s --limit-burst 400 -j ACCEPT
 
-    local IFS_BAK="$IFS"; IFS=',' read -ra PLIST <<< "$ports_csv"; IFS="$IFS_BAK"
+    # Allow config ports
+    local IFS_BAK="$IFS"
+    IFS=',' read -ra PLIST <<< "$ports_csv"
+    IFS="$IFS_BAK"
+    
     for p in "${PLIST[@]}"; do
         p=$(echo "$p" | tr -d ' ')
         iptables -A INPUT -p tcp --dport "$p" -j ACCEPT
+        iptables -A INPUT -p udp --dport "$p" -j ACCEPT
     done
-    iptables -A INPUT -p tcp --dport 8404 -s 127.0.0.1 -j ACCEPT
 
+    # HAProxy stats (localhost only)
+    iptables -A INPUT -p tcp --dport 8404 -s 127.0.0.1 -j ACCEPT
+    iptables -A INPUT -p tcp --dport 8404 -j DROP
+
+    # Allow ping
+    iptables -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
+    iptables -A INPUT -p icmp --icmp-type echo-reply -j ACCEPT
+
+    # Save rules
     netfilter-persistent save > /dev/null 2>&1
-    msg_ok "iptables rules applied (Iran)"
-    log_msg "INFO" "iptables Iran configured"
+    
+    msg_ok "iptables rules applied (Iran) - ${#PLIST[@]} ports"
+    log_msg "INFO" "iptables Iran configured for ports: ${ports_csv}"
 }
 
 # ─── iptables Kharej ───────────────────────────
 setup_ipt_kharej() {
     local iran_ip="$1" hy_port="$2" ports_csv="$3" iface="$4"
 
-    iptables -F; iptables -t nat -F; iptables -t mangle -F
-    iptables -P INPUT ACCEPT; iptables -P FORWARD ACCEPT; iptables -P OUTPUT ACCEPT
+    # Flush all rules
+    iptables -F
+    iptables -t nat -F
+    iptables -t mangle -F
+    iptables -X 2>/dev/null
+    iptables -t nat -X 2>/dev/null
+    iptables -t mangle -X 2>/dev/null
 
+    # Set default policies
+    iptables -P INPUT ACCEPT
+    iptables -P FORWARD ACCEPT
+    iptables -P OUTPUT ACCEPT
+
+    # Allow established connections
     iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+    # Allow loopback
+    iptables -A INPUT -i lo -j ACCEPT
+    iptables -A OUTPUT -o lo -j ACCEPT
+
+    # SSH
     iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+
+    # GRE tunnel
     iptables -A INPUT -p gre -s "${iran_ip}" -j ACCEPT
     iptables -A OUTPUT -p gre -d "${iran_ip}" -j ACCEPT
-    iptables -A INPUT -p udp --dport "${hy_port}" -j ACCEPT
-    iptables -A FORWARD -i gre1 -j ACCEPT
-    iptables -A FORWARD -o gre1 -j ACCEPT
-    iptables -t nat -A POSTROUTING -s ${GRE_SUBNET} -o "${iface}" -j MASQUERADE
-    iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-    iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
 
-    local IFS_BAK="$IFS"; IFS=',' read -ra PLIST <<< "$ports_csv"; IFS="$IFS_BAK"
+    # Hysteria2 UDP
+    iptables -A INPUT -p udp --dport "${hy_port}" -j ACCEPT
+
+    # GRE forwarding
+    iptables -A FORWARD -i gre1 -o "${iface}" -j ACCEPT
+    iptables -A FORWARD -i "${iface}" -o gre1 -j ACCEPT
+    iptables -A FORWARD -i gre1 -o gre1 -j ACCEPT
+
+    # NAT for GRE
+    iptables -t nat -A POSTROUTING -s ${GRE_SUBNET} -o "${iface}" -j MASQUERADE
+
+    # MSS clamping
+    iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -o gre1 -j TCPMSS --set-mss 1360
+
+    # Drop invalid packets
+    iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
+    iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP
+
+    # Allow config ports from GRE
+    local IFS_BAK="$IFS"
+    IFS=',' read -ra PLIST <<< "$ports_csv"
+    IFS="$IFS_BAK"
+    
     for p in "${PLIST[@]}"; do
         p=$(echo "$p" | tr -d ' ')
         iptables -A INPUT -p tcp --dport "$p" -j ACCEPT
+        iptables -A INPUT -p udp --dport "$p" -j ACCEPT
     done
 
+    # Allow ping
+    iptables -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
+    iptables -A INPUT -p icmp --icmp-type echo-reply -j ACCEPT
+
+    # Save rules
     netfilter-persistent save > /dev/null 2>&1
+    
     msg_ok "iptables rules applied (Kharej)"
     log_msg "INFO" "iptables Kharej configured"
 }
 
 # ─── Watchdog ──────────────────────────────────
 setup_watchdog() {
-    cat > "$WATCHDOG_SCRIPT" << WEOF
+    cat > "$WATCHDOG_SCRIPT" << 'WEOF'
 #!/bin/bash
 LOG="/var/log/vira-watchdog.log"
-ts() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$1" >> "\$LOG"; }
+CONFIG="/etc/vira-tunnel/config.env"
+
+ts() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG"; }
+
+# Load config
+[[ -f "$CONFIG" ]] && source "$CONFIG"
+
+# Check Hysteria2
 if ! systemctl is-active --quiet vira-hysteria 2>/dev/null; then
-    ts "WARN: Hysteria2 down, restarting"; systemctl restart vira-hysteria 2>/dev/null
-fi
-if ! ping -c1 -W3 ${GRE_KHAREJ} &>/dev/null && ! ping -c1 -W3 ${GRE_IRAN} &>/dev/null; then
-    ts "WARN: GRE down, restarting"; systemctl restart vira-gre 2>/dev/null
-fi
-if systemctl list-units --type=service 2>/dev/null | grep -q haproxy; then
-    if ! systemctl is-active --quiet haproxy 2>/dev/null; then
-        ts "WARN: HAProxy down, restarting"; systemctl restart haproxy 2>/dev/null
+    ts "WARN: Hysteria2 down, restarting"
+    systemctl restart vira-hysteria 2>/dev/null
+    sleep 5
+    if systemctl is-active --quiet vira-hysteria 2>/dev/null; then
+        ts "INFO: Hysteria2 restarted successfully"
+    else
+        ts "ERROR: Hysteria2 restart failed"
     fi
 fi
-[[ \$(wc -l < "\$LOG" 2>/dev/null || echo 0) -gt 10000 ]] && tail -5000 "\$LOG" > "\${LOG}.tmp" && mv "\${LOG}.tmp" "\$LOG"
+
+# Check GRE
+if ! ip link show gre1 &>/dev/null; then
+    ts "WARN: GRE interface missing, restarting"
+    systemctl restart vira-gre 2>/dev/null
+    sleep 5
+    if ip link show gre1 &>/dev/null; then
+        ts "INFO: GRE restarted successfully"
+        # Also restart Hysteria2 after GRE restart
+        systemctl restart vira-hysteria 2>/dev/null
+    else
+        ts "ERROR: GRE restart failed"
+    fi
+else
+    # Check GRE connectivity
+    if [[ "$SERVER_ROLE" == "iran" ]]; then
+        PEER="102.230.9.2"
+    else
+        PEER="102.230.9.1"
+    fi
+    
+    if ! ping -c2 -W5 "$PEER" &>/dev/null; then
+        ts "WARN: GRE peer $PEER unreachable"
+    fi
+fi
+
+# Check HAProxy (Iran only)
+if [[ "$SERVER_ROLE" == "iran" ]]; then
+    if systemctl list-units --type=service 2>/dev/null | grep -q haproxy; then
+        if ! systemctl is-active --quiet haproxy 2>/dev/null; then
+            ts "WARN: HAProxy down, restarting"
+            systemctl restart haproxy 2>/dev/null
+            sleep 2
+            if systemctl is-active --quiet haproxy 2>/dev/null; then
+                ts "INFO: HAProxy restarted successfully"
+            else
+                ts "ERROR: HAProxy restart failed"
+            fi
+        fi
+    fi
+fi
+
+# Rotate log if too large
+if [[ -f "$LOG" ]]; then
+    LOG_SIZE=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+    if (( LOG_SIZE > 10000 )); then
+        tail -5000 "$LOG" > "${LOG}.tmp" && mv "${LOG}.tmp" "$LOG"
+        ts "INFO: Log rotated (was $LOG_SIZE lines)"
+    fi
+fi
 WEOF
+
     chmod +x "$WATCHDOG_SCRIPT"
-    ( crontab -l 2>/dev/null | grep -v "vira-watchdog"; echo "*/2 * * * * ${WATCHDOG_SCRIPT}" ) | crontab -
+    
+    # Remove old cron job and add new one
+    ( crontab -l 2>/dev/null | grep -v "vira-watchdog" ) | crontab - 2>/dev/null
+    ( crontab -l 2>/dev/null; echo "*/2 * * * * ${WATCHDOG_SCRIPT} >/dev/null 2>&1" ) | crontab -
+    
     msg_ok "Watchdog enabled (every 2 min)"
     log_msg "INFO" "Watchdog installed"
 }
@@ -863,7 +1129,8 @@ install_wizard() {
         *) msg_err "Invalid choice"; return 1 ;;
     esac
 
-    echo ""; print_line
+    echo ""
+    print_line
 
     printf "\n  ${G2}${BOLD}Step 2:${RST} ${GR1}Server IP Addresses${RST}\n\n"
     local my_ip
@@ -877,11 +1144,24 @@ install_wizard() {
         ask "Kharej server public IP (this server)" KHAREJ_IP "$my_ip"
     fi
 
+    # Validate IPs
     if [[ -z "$IRAN_IP" || -z "$KHAREJ_IP" ]]; then
-        msg_err "IPs cannot be empty"; return 1
+        msg_err "IPs cannot be empty"
+        return 1
     fi
 
-    echo ""; print_line
+    if ! [[ "$IRAN_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        msg_err "Invalid Iran IP format"
+        return 1
+    fi
+
+    if ! [[ "$KHAREJ_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        msg_err "Invalid Kharej IP format"
+        return 1
+    fi
+
+    echo ""
+    print_line
 
     printf "\n  ${G2}${BOLD}Step 3:${RST} ${GR1}Hysteria2 Settings${RST}\n\n"
     local def_pass def_obfs
@@ -891,33 +1171,55 @@ install_wizard() {
     ask "Hysteria2 password" HYSTERIA_PASSWORD "$def_pass"
     ask "Obfuscation password (Salamander)" OBFS_PASSWORD "$def_obfs"
 
-    echo ""; print_line
+    # Validate port
+    if ! [[ "$HYSTERIA_PORT" =~ ^[0-9]+$ ]] || (( HYSTERIA_PORT < 1 || HYSTERIA_PORT > 65535 )); then
+        msg_err "Invalid port number"
+        return 1
+    fi
+
+    echo ""
+    print_line
 
     printf "\n  ${G2}${BOLD}Step 4:${RST} ${GR1}Config Panel Ports${RST}\n\n"
     msg_info "Enter ports used by your V2Ray panel (comma-separated)"
-    msg_info "Example: 443,80,8443,2053,2083,2087,2096,54321"
+    msg_info "Example: 443,80,8443,2053,2083,2087,2096"
     echo ""
-    ask "Config ports" CONFIG_PORTS "443,80,8443,2053,2083,2087,2096,54321"
+    ask "Config ports" CONFIG_PORTS "443,80,8443,2053,2083,2087,2096"
+
+    # Validate ports
+    local IFS_BAK="$IFS"
+    IFS=',' read -ra PLIST <<< "$CONFIG_PORTS"
+    IFS="$IFS_BAK"
+    
+    for p in "${PLIST[@]}"; do
+        p=$(echo "$p" | tr -d ' ')
+        if ! [[ "$p" =~ ^[0-9]+$ ]] || (( p < 1 || p > 65535 )); then
+            msg_err "Invalid port: $p"
+            return 1
+        fi
+    done
 
     NET_IFACE=$(detect_interface)
 
-    echo ""; print_line
+    echo ""
+    print_line
 
     printf "\n  ${G2}${BOLD}Summary:${RST}\n\n"
     printf "  ${GR4}┌─────────────────────────────────────────────────┐${RST}\n"
-    printf "  ${GR4}│${RST}  ${GR3}Role:${RST}          ${G1}%-34s${RST}${GR4}│${RST}\n" "$([ "$SERVER_ROLE" = "iran" ] && echo "IRAN (Entry)" || echo "KHAREJ (Exit)")"
+    printf "  ${GR4}│${RST}  ${GR3}Role:${RST}          ${G1}${BOLD}%-34s${RST}${GR4}│${RST}\n" "$([ "$SERVER_ROLE" = "iran" ] && echo "IRAN (Entry)" || echo "KHAREJ (Exit)")"
     printf "  ${GR4}│${RST}  ${GR3}Iran IP:${RST}       ${GR1}%-34s${RST}${GR4}│${RST}\n" "$IRAN_IP"
     printf "  ${GR4}│${RST}  ${GR3}Kharej IP:${RST}     ${GR1}%-34s${RST}${GR4}│${RST}\n" "$KHAREJ_IP"
     printf "  ${GR4}│${RST}  ${GR3}GRE Iran:${RST}      ${GR1}%-34s${RST}${GR4}│${RST}\n" "$GRE_IRAN"
     printf "  ${GR4}│${RST}  ${GR3}GRE Kharej:${RST}    ${GR1}%-34s${RST}${GR4}│${RST}\n" "$GRE_KHAREJ"
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Port:${RST}      ${GR1}%-34s${RST}${GR4}│${RST}\n" "$HYSTERIA_PORT"
-    printf "  ${GR4}│${RST}  ${GR3}Config Ports:${RST}   ${GR1}%-34s${RST}${GR4}│${RST}\n" "$CONFIG_PORTS"
+    printf "  ${GR4}│${RST}  ${GR3}Config Ports:${RST}  ${GR1}%-34s${RST}${GR4}│${RST}\n" "$CONFIG_PORTS"
     printf "  ${GR4}│${RST}  ${GR3}Interface:${RST}     ${GR1}%-34s${RST}${GR4}│${RST}\n" "$NET_IFACE"
     printf "  ${GR4}└─────────────────────────────────────────────────┘${RST}\n"
     echo ""
 
     if ! confirm "Proceed with installation?"; then
-        msg_warn "Cancelled"; return 0
+        msg_warn "Cancelled"
+        return 0
     fi
 
     echo ""
@@ -926,39 +1228,40 @@ install_wizard() {
     local steps
     [[ "$SERVER_ROLE" == "iran" ]] && steps=7 || steps=6
     local s=1
+    local failed=0
 
     progress_bar $s $steps "Kernel"
     echo ""
-    apply_kernel
+    apply_kernel || (( failed++ ))
     (( s++ ))
 
     progress_bar $s $steps "Packages"
     echo ""
-    install_prereqs "$SERVER_ROLE"
+    install_prereqs "$SERVER_ROLE" || (( failed++ ))
     (( s++ ))
 
     progress_bar $s $steps "GRE Tunnel"
     echo ""
     if [[ "$SERVER_ROLE" == "iran" ]]; then
-        setup_gre "iran" "$IRAN_IP" "$KHAREJ_IP"
+        setup_gre "iran" "$IRAN_IP" "$KHAREJ_IP" || (( failed++ ))
     else
-        setup_gre "kharej" "$KHAREJ_IP" "$IRAN_IP"
+        setup_gre "kharej" "$KHAREJ_IP" "$IRAN_IP" || (( failed++ ))
     fi
     (( s++ ))
 
     progress_bar $s $steps "Hysteria2"
     echo ""
     if [[ "$SERVER_ROLE" == "iran" ]]; then
-        setup_hy2_client "$KHAREJ_IP" "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD" "$OBFS_PASSWORD" "$CONFIG_PORTS"
+        setup_hy2_client "$KHAREJ_IP" "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD" "$OBFS_PASSWORD" "$CONFIG_PORTS" || (( failed++ ))
     else
-        setup_hy2_server "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD" "$OBFS_PASSWORD"
+        setup_hy2_server "$HYSTERIA_PORT" "$HYSTERIA_PASSWORD" "$OBFS_PASSWORD" || (( failed++ ))
     fi
     (( s++ ))
 
     if [[ "$SERVER_ROLE" == "iran" ]]; then
         progress_bar $s $steps "HAProxy"
         echo ""
-        setup_haproxy "$CONFIG_PORTS"
+        setup_haproxy "$CONFIG_PORTS" || (( failed++ ))
         (( s++ ))
     fi
 
@@ -978,7 +1281,12 @@ install_wizard() {
     save_config
 
     echo ""
-    printf "  ${GRN}${BOLD}━━━ Installation Complete ━━━${RST}\n\n"
+    if (( failed > 0 )); then
+        printf "  ${YLW}${BOLD}━━━ Installation Completed with ${failed} issue(s) ━━━${RST}\n\n"
+        msg_warn "Some components may need manual review"
+    else
+        printf "  ${GRN}${BOLD}━━━ Installation Complete ━━━${RST}\n\n"
+    fi
 
     if [[ "$SERVER_ROLE" == "iran" ]]; then
         printf "  ${G5}╔═════════════════════════════════════════════════════╗${RST}\n"
@@ -993,10 +1301,11 @@ install_wizard() {
         printf "  ${G5}╚═════════════════════════════════════════════════════╝${RST}\n"
     else
         printf "  ${G5}╔═════════════════════════════════════════════════════╗${RST}\n"
-        printf "  ${G5}║${RST}  ${GRN}Kharej server is ready!${RST}                              ${G5}║${RST}\n"
-        printf "  ${G5}║${RST}  Now run this script on the Iran server too.         ${G5}║${RST}\n"
+        printf "  ${G5}║${RST}  ${GRN}Kharej server is ready!${RST}                             ${G5}║${RST}\n"
+        printf "  ${G5}║${RST}  Now run this script on the Iran server too.        ${G5}║${RST}\n"
         printf "  ${G5}╚═════════════════════════════════════════════════════╝${RST}\n"
     fi
+    
     press_key
 }
 
@@ -1038,11 +1347,35 @@ show_status() {
     crontab -l 2>/dev/null | grep -q "vira-watchdog" && wd_s="ACTIVE"
     print_stat "Watchdog" "$wd_s" "🐕"
 
+    # Check Hysteria2 port bindings for Iran
+    if [[ "$SERVER_ROLE" == "iran" ]]; then
+        echo ""
+        printf "  ${G3}├── ${G2}${BOLD}Port Bindings (Hysteria2)${RST}\n"
+        local IFS_BAK="$IFS"
+        IFS=',' read -ra PLIST <<< "$CONFIG_PORTS"
+        IFS="$IFS_BAK"
+        local listening=0 not_listening=0
+        for p in "${PLIST[@]}"; do
+            p=$(echo "$p" | tr -d ' ')
+            local lp=$(( 20000 + p ))
+            if ss -tlnp 2>/dev/null | grep -q "127.0.0.1:${lp}"; then
+                (( listening++ ))
+            else
+                (( not_listening++ ))
+            fi
+        done
+        if (( not_listening == 0 )); then
+            printf "  ${GR4}│${RST}     ${GRN}● All ${listening} ports listening${RST}\n"
+        else
+            printf "  ${GR4}│${RST}     ${YLW}● ${listening} listening, ${not_listening} not listening${RST}\n"
+        fi
+    fi
+
     if [[ "$SERVER_ROLE" == "iran" ]] && [[ -S /run/haproxy/admin.sock ]]; then
         echo ""
         printf "  ${G3}├── ${G2}${BOLD}HAProxy Backends${RST}\n"
         echo "show stat" | socat /run/haproxy/admin.sock stdio 2>/dev/null | \
-        grep -E "^bk_" | while IFS=',' read -r px sv _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ st _rest; do
+        grep -E "^bk_" | head -10 | while IFS=',' read -r px sv _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ st _rest; do
             local ic
             [[ "$st" == "UP" ]] && ic="${GRN}█ UP  ${RST}" || ic="${RED}█ DOWN${RST}"
             printf "  ${GR4}│${RST}     ${ic} ${GR2}%-25s${RST}\n" "${sv}"
@@ -1476,16 +1809,16 @@ auto_fix() {
     msg_ok "IP Forwarding enabled"
 
     systemctl restart vira-gre 2>/dev/null
-    sleep 2
+    sleep 4
     msg_ok "GRE restarted"
 
     systemctl restart vira-hysteria 2>/dev/null
-    sleep 2
+    sleep 5
     msg_ok "Hysteria2 restarted"
 
     if [[ "$SERVER_ROLE" == "iran" ]]; then
         systemctl restart haproxy 2>/dev/null
-        sleep 1
+        sleep 2
         msg_ok "HAProxy restarted"
     fi
 
@@ -1557,8 +1890,8 @@ manage_services() {
     echo ""
     case "$sc" in
         1)
-            systemctl restart vira-gre 2>/dev/null; sleep 1; msg_ok "GRE restarted"
-            systemctl restart vira-hysteria 2>/dev/null; sleep 1; msg_ok "Hysteria2 restarted"
+            systemctl restart vira-gre 2>/dev/null; sleep 3; msg_ok "GRE restarted"
+            systemctl restart vira-hysteria 2>/dev/null; sleep 3; msg_ok "Hysteria2 restarted"
             [[ "$SERVER_ROLE" == "iran" ]] && { systemctl restart haproxy 2>/dev/null; msg_ok "HAProxy restarted"; }
             ;;
         2)
@@ -1568,8 +1901,8 @@ manage_services() {
             msg_ok "All services stopped"
             ;;
         3)
-            systemctl start vira-gre 2>/dev/null; sleep 1
-            systemctl start vira-hysteria 2>/dev/null; sleep 1
+            systemctl start vira-gre 2>/dev/null; sleep 3
+            systemctl start vira-hysteria 2>/dev/null; sleep 3
             [[ "$SERVER_ROLE" == "iran" ]] && systemctl start haproxy 2>/dev/null
             msg_ok "All services started"
             ;;
@@ -1611,7 +1944,7 @@ show_config() {
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Port:${RST}       ${GR1}%-32s${RST}${GR4}│${RST}\n" "$HYSTERIA_PORT"
     printf "  ${GR4}│${RST}  ${GR3}Hy2 Password:${RST}   ${G5}%-32s${RST}${GR4}│${RST}\n" "$HYSTERIA_PASSWORD"
     printf "  ${GR4}│${RST}  ${GR3}Obfs Password:${RST}  ${G5}%-32s${RST}${GR4}│${RST}\n" "$OBFS_PASSWORD"
-    printf "  ${GR4}│${RST}  ${GR3}Config Ports:${RST}    ${GR1}%-32s${RST}${GR4}│${RST}\n" "$CONFIG_PORTS"
+    printf "  ${GR4}│${RST}  ${GR3}Config Ports:${RST}   ${GR1}%-32s${RST}${GR4}│${RST}\n" "$CONFIG_PORTS"
     printf "  ${GR4}│${RST}  ${GR3}Interface:${RST}      ${GR1}%-32s${RST}${GR4}│${RST}\n" "$NET_IFACE"
     printf "  ${GR4}└──────────────────────────────────────────────────┘${RST}\n"
 
@@ -1668,6 +2001,7 @@ advanced_menu() {
         print_menu "6" "Edit Config ports" "✏️"
         print_menu "7" "Reset & reapply iptables" "🔄"
         print_menu "8" "Update Hysteria2" "⬆️"
+        print_menu "9" "View Hysteria2 config" "📄"
         print_menu "0" "Back" "↩️"
         echo ""
         ask "Choice" ac ""
@@ -1747,7 +2081,18 @@ advanced_menu() {
                 bash <(curl -fsSL https://get.hy2.sh/) > /dev/null 2>&1 &
                 spinner $! "Downloading update..."
                 systemctl restart vira-hysteria 2>/dev/null
+                sleep 3
                 msg_ok "Hysteria2 updated"
+                press_key
+                ;;
+            9)
+                show_logo
+                printf "\n  ${G2}${BOLD}Hysteria2 Config:${RST}\n\n"
+                if [[ -f "${HYSTERIA_DIR}/config.yaml" ]]; then
+                    cat "${HYSTERIA_DIR}/config.yaml" | while IFS= read -r l; do printf "  ${GR2}%s${RST}\n" "$l"; done
+                else
+                    msg_warn "Config file not found"
+                fi
                 press_key
                 ;;
             0) return ;;
@@ -1788,6 +2133,7 @@ uninstall_tunnel() {
     netfilter-persistent save > /dev/null 2>&1
     msg_ok "iptables flushed"
 
+    ip link set gre1 down 2>/dev/null
     ip tunnel del gre1 2>/dev/null
     msg_ok "GRE tunnel removed"
 
