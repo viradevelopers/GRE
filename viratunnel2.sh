@@ -4,7 +4,7 @@
 #  iptables + HAProxy + GRE + Hysteria2
 # ═══════════════════════════════════════════════════════════════════
 
-VERSION="2.2"
+VERSION="2"
 CONFIG_DIR="/etc/vira-tunnel"
 CONFIG_FILE="${CONFIG_DIR}/config.env"
 LOG_FILE="/var/log/vira-tunnel.log"
@@ -2246,4 +2246,5 @@ main() {
 }
 
 main "$@"
+
 
